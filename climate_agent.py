@@ -17,7 +17,7 @@ WHAT CHANGED FROM THE ORIGINAL:
 - _safety_check() added: post-generation keyword filter as last-resort net
   against the model suggesting physical risk-taking. Not present in
   novelbot because persona drift there was annoying, not safety-relevant.
-  This is a blunt heuristic - see TODO in _safety_check for hardening.
+  This uses a small negation-aware heuristic to avoid obvious refusals.
 - num_ctx/num_predict tuned down (1024/150 vs 2048/300) - Climate Guide
   replies are meant to be short, so tighter caps = faster on CPU.
 """
@@ -277,17 +277,20 @@ def _parse_text_tool_calls(content: str, tool_map: dict) -> list | None:
 # SYSTEM rule gets ignored by the model. Fires before the reply is ever
 # shown to the user.
 #
-# TODO: false positives are likely (a reply correctly explaining why NOT to
-# approach a site might match). A more robust version would run a second
-# cheap classification pass ("does this reply suggest physical risk:
-# yes/no") rather than regex - left as a known limitation for now.
 # ---------------------------------------------------------------------------
 _RISK_PATTERNS = [
-    r"\bgo (?:check|inspect|look at|visit|verify)\b.{0,40}\b(site|location|spot|area|mine|dump)",
-    r"\bvisit the (?:site|location|spot|area|mine|dumping ground)\b",
-    r"\bin person\b.{0,30}\b(check|verify|inspect|confirm)",
-    r"\bwalk (?:over|up|down|to)\b.{0,40}\b(site|mine|dump|area)",
+    re.compile(r"\bgo (?:check|inspect|look at|visit|verify)\b.{0,40}\b(site|location|spot|area|mine|dump)"),
+    re.compile(r"\bvisit the (?:site|location|spot|area|mine|dumping ground)\b"),
+    re.compile(r"\bin person\b.{0,30}\b(check|verify|inspect|confirm)"),
+    re.compile(r"\bwalk (?:over|up|down|to)\b.{0,40}\b(site|mine|dump|area)"),
 ]
+_SAFE_RISK_PREFIX = re.compile(
+    r"\b(?:"
+    r"avoid|never|do not|don't|dont|should not|shouldn't|must not|not to|"
+    r"cannot|can't|can not|won't|wouldn't|unsafe to|not safe to|"
+    r"do not recommend|don't recommend|cannot recommend|can't recommend"
+    r")\b.{0,80}$"
+)
 _SAFE_FALLBACK_REPLY = (
     "I want to flag that I can't recommend going to check that in person. "
     "Let's stick to remote evidence instead - photos you already have, "
@@ -295,12 +298,17 @@ _SAFE_FALLBACK_REPLY = (
 )
 
 
+def _is_negated_risk_match(reply: str, start: int) -> bool:
+    return bool(_SAFE_RISK_PREFIX.search(reply[max(0, start - 100):start]))
+
+
 def _safety_check(reply: str) -> str:
     lowered = reply.lower()
     for pattern in _RISK_PATTERNS:
-        if re.search(pattern, lowered):
+        match = pattern.search(lowered)
+        if match and not _is_negated_risk_match(lowered, match.start()):
             logger.warning(
-                f"[safety] reply matched risk pattern {pattern!r} - "
+                f"[safety] reply matched risk pattern {pattern.pattern!r} - "
                 f"replacing with safe fallback. Original: {reply[:200]!r}"
             )
             return _SAFE_FALLBACK_REPLY
