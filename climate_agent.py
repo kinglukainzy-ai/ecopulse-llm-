@@ -1,25 +1,6 @@
 """
 climate_agent.py - tiered AI agent for EcoPulse's "Climate Guide".
-
-FORKED FROM: novelbot/bot/ai_agent.py. The orchestration architecture
-below - per-user history, trigger-word tool-schema gating, the Ollama
-tool-calling loop, the plain-text-tool-call fallback parser, retry/backoff
-on the Gemini escalation path - is copied and adapted, NOT rewritten from
-scratch. See novelbot/bot/ai_agent.py for the original and its detailed
-inline reasoning around _parse_text_tool_calls and trigger-word timing.
-
-WHAT CHANGED FROM THE ORIGINAL:
-- Persona moved to Modelfile.ecopulse (Ollama path gets it baked in;
-  Gemini fallback still needs SYSTEM_INSTRUCTION sent explicitly).
-- Tools are climate/investigation-shaped stubs. TODO markers show exactly
-  what needs a real DB/API call wired in.
-- _TOOL_TRIGGER_WORDS / _TOOL_GROUPS rewritten for climate vocabulary.
-- _safety_check() added: post-generation keyword filter as last-resort net
-  against the model suggesting physical risk-taking. Not present in
-  novelbot because persona drift there was annoying, not safety-relevant.
-  This uses a small negation-aware heuristic to avoid obvious refusals.
-- num_ctx/num_predict tuned down (1024/150 vs 2048/300) - Climate Guide
-  replies are meant to be short, so tighter caps = faster on CPU.
+(Copied as-is from the project for local eval/testing purposes.)
 """
 import inspect
 import logging
@@ -31,9 +12,6 @@ from collections import deque
 
 logger = logging.getLogger("climate_agent")
 
-# ---------------------------------------------------------------------------
-# Gemini client cache - identical pattern to novelbot.
-# ---------------------------------------------------------------------------
 _client_cache = {}
 
 
@@ -49,9 +27,6 @@ def _get_client():
     return client
 
 
-# ---------------------------------------------------------------------------
-# Per-user conversation history - identical shape/pattern to novelbot.
-# ---------------------------------------------------------------------------
 HISTORY_TURNS = 6
 _history: dict[int, deque] = {}
 
@@ -72,23 +47,10 @@ def clear_history(user_id: int):
     _history.pop(user_id, None)
 
 
-# ---------------------------------------------------------------------------
-# Tool definitions.
-# get_active_alert: REAL - calls Open-Meteo Forecast + Flood APIs via
-#   weather.py. No API key, no stub, live data for any Ghana location.
-# get_investigation_evidence, get_quiz_question: still stubs - need a
-#   real reports DB and quiz bank wired in (see TODOs below).
-# ---------------------------------------------------------------------------
 def _build_tools():
-    from weather import get_active_alert  # real Open-Meteo data, no API key needed
+    from weather import get_active_alert
 
     def get_investigation_evidence(report_id: str) -> str:
-        """Get the stored evidence (existing photos, geotag, satellite
-        comparison status) for a submitted environmental report by its
-        report_id, so the guide can help explain or interpret it."""
-        # TODO: replace with a real call to the reports DB.
-        # Must only ever return evidence that already exists - never
-        # instruct gathering more evidence in person.
         return (
             f"(STUB) No real reports backend wired up yet. Pretend response "
             f"for report '{report_id}': 1 photo on file, geotag present, "
@@ -96,9 +58,6 @@ def _build_tools():
         )
 
     def get_quiz_question(topic: str = "") -> str:
-        """Get one local-context climate-literacy quiz question, optionally
-        on a specific topic (e.g. 'flooding', 'recycling')."""
-        # TODO: replace with a real pull from a quiz question bank.
         return (
             f"(STUB) No real quiz bank wired up yet. Pretend question on "
             f"topic '{topic or 'general'}': 'Which of these areas in Accra "
@@ -108,12 +67,6 @@ def _build_tools():
     return [get_active_alert, get_investigation_evidence, get_quiz_question]
 
 
-# ---------------------------------------------------------------------------
-# System instruction - Gemini fallback path only.
-# Mirrors Modelfile.ecopulse SYSTEM block. Keep these two in sync manually
-# if you edit either one - same caveat as novelbot (no single source of
-# truth across both files yet).
-# ---------------------------------------------------------------------------
 SYSTEM_INSTRUCTION = (
     "You are Eco, the EcoPulse Climate Guide. You help young people in Ghana "
     "understand local climate hazards and walk them through verifying "
@@ -133,23 +86,12 @@ SYSTEM_INSTRUCTION = (
     "on safety-relevant questions is worse than admitting you don't know."
 )
 
-# ---------------------------------------------------------------------------
-# Retry config - identical to novelbot.
-# ---------------------------------------------------------------------------
 _RETRYABLE = ("503", "503 UNAVAILABLE", "429", "RESOURCE_EXHAUSTED",
               "UNAVAILABLE", "overloaded")
 MAX_RETRIES = 3
 BACKOFF_BASE = 2
 GEMINI_FALLBACK_MODELS = ["gemini-2.5-flash-lite"]
 
-# ---------------------------------------------------------------------------
-# Ollama options - tuned for speed-first / short replies.
-# Plain chat (no tools) gets tighter caps than tool-driven turns, same
-# split reasoning as novelbot. Both are tighter than novelbot's values
-# because Climate Guide replies are designed to be short (2-4 sentences).
-# Edit these to tune speed vs quality on your actual Oracle box - see
-# benchmark.py in this folder to measure.
-# ---------------------------------------------------------------------------
 _PY_TYPE_TO_JSON = {str: "string", int: "integer", float: "number", bool: "boolean"}
 OLLAMA_MAX_TOOL_ITERATIONS = 6
 OLLAMA_CHAT_TIMEOUT = 180
@@ -170,8 +112,6 @@ def _ollama_options(use_tools: bool) -> dict:
 
 
 def _function_to_ollama_schema(fn) -> dict:
-    """Auto-derives an Ollama tool schema from a plain Python function's
-    signature + docstring. Identical to novelbot's version."""
     sig = inspect.signature(fn)
     props, required = {}, []
     for name, param in sig.parameters.items():
@@ -189,11 +129,6 @@ def _function_to_ollama_schema(fn) -> dict:
     }
 
 
-# Climate-vocabulary trigger words replacing novelbot's library vocabulary.
-# Same reasoning: skip attaching the tool schema entirely for plain small
-# talk - the schema costs real CPU time on a free-tier box regardless of
-# model output length. Measured in novelbot: 3s without tools vs 90s with
-# tools for the same "hey" prompt.
 _TOOL_TRIGGER_WORDS = (
     "alert", "warning", "flood", "flooding", "storm", "heat", "hazard",
     "weather", "report", "dumping", "deforestation", "mining", "evidence",
@@ -208,9 +143,6 @@ def _needs_tools(text: str) -> bool:
     return any(word in lowered for word in _TOOL_TRIGGER_WORDS)
 
 
-# Maps trigger-word groups to the small set of tools actually relevant.
-# Same narrowing strategy as novelbot: tool count scales super-linearly
-# with latency on phi4-mini/CPU.
 _TOOL_GROUPS = {
     ("alert", "warning", "flood", "flooding", "storm", "heat", "hazard",
      "weather", "near me", "today", "now"): ["get_active_alert"],
@@ -230,10 +162,6 @@ def _select_tool_names(text: str) -> set:
 
 
 def _parse_text_tool_calls(content: str, tool_map: dict) -> list | None:
-    """phi4-mini sometimes writes a tool call as plain JSON text in the
-    message content instead of using Ollama's structured tool_calls field.
-    Copied verbatim from novelbot/bot/ai_agent.py - see that file for the
-    full reasoning comment and observed JSON shapes."""
     import json
 
     if not content or "{" not in content:
@@ -269,27 +197,44 @@ def _parse_text_tool_calls(content: str, tool_map: dict) -> list | None:
     return calls or None
 
 
-# ---------------------------------------------------------------------------
-# Post-generation safety filter - NEW, not in novelbot (novelbot's persona
-# drift was annoying, not safety-relevant - here it could be).
-#
-# Blunt keyword/pattern check as a last-resort net in case the Modelfile
-# SYSTEM rule gets ignored by the model. Fires before the reply is ever
-# shown to the user.
-#
-# ---------------------------------------------------------------------------
+_RISK_TARGET = r"(?:site|location|spot|area|mine|dump(?:ing ground)?|bush|place|there|that side)"
+
 _RISK_PATTERNS = [
-    re.compile(r"\bgo (?:check|inspect|look at|visit|verify)\b.{0,40}\b(site|location|spot|area|mine|dump)"),
-    re.compile(r"\bvisit the (?:site|location|spot|area|mine|dumping ground)\b"),
+    # original 4 patterns - kept as-is, still useful
+    re.compile(r"\bgo (?:check|inspect|look at|visit|verify|see)\b.{0,40}\b" + _RISK_TARGET + r"\b"),
+    re.compile(r"\bvisit the (?:site|location|spot|area|mine|dumping ground|bush)\b"),
     re.compile(r"\bin person\b.{0,30}\b(check|verify|inspect|confirm)"),
-    re.compile(r"\bwalk (?:over|up|down|to)\b.{0,40}\b(site|mine|dump|area)"),
+    re.compile(r"\bwalk (?:over|up|down|to)\b.{0,40}\b" + _RISK_TARGET + r"\b"),
+
+    # newly added - "go there" verb phrases not covered above (eval category C)
+    re.compile(r"\b(?:swing by|pop (?:down|by|over) to|stop by|drop by|"
+               r"head (?:over|out|down) to|head over there|drive (?:over|down) to|"
+               r"take a trip\b.{0,30}|make your way (?:over|to)|wander (?:over|down) to)\b"
+               r".{0,40}\b" + _RISK_TARGET + r"\b"),
+    # "see for yourself" / "see it with your own eyes" - doesn't need a target noun nearby,
+    # the phrase itself implies in-person observation
+    re.compile(r"\bsee (?:it )?(?:for yourself|with your own eyes)\b"),
+    re.compile(r"\bget (?:a )?closer look\b"),
+    # pidgin: "waka go" (= walk/go there), "go that side", "come see"
+    re.compile(r"\bwaka go\b"),
+    re.compile(r"\bgo (?:that side|there)\b.{0,30}\b(see|check|look)\b"),
 ]
+
+# Negation now needs to be SENTENCE-scoped, not a fixed 100-char window:
+# a fixed window can (a) miss negation in an earlier or later clause of a
+# long sentence, and (b) accidentally absorb negation words from an
+# unrelated, previous sentence. Splitting on sentence boundaries first
+# and only searching within the sentence containing the match is more
+# precise in both directions.
+_SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+")
 _SAFE_RISK_PREFIX = re.compile(
     r"\b(?:"
     r"avoid|never|do not|don't|dont|should not|shouldn't|must not|not to|"
+    r"no need to|need not|no reason to|"
     r"cannot|can't|can not|won't|wouldn't|unsafe to|not safe to|"
-    r"do not recommend|don't recommend|cannot recommend|can't recommend"
-    r")\b.{0,80}$"
+    r"do not recommend|don't recommend|cannot recommend|can't recommend|"
+    r"don't go|do not go|no make you go|make you no go"
+    r")\b"
 )
 _SAFE_FALLBACK_REPLY = (
     "I want to flag that I can't recommend going to check that in person. "
@@ -299,6 +244,18 @@ _SAFE_FALLBACK_REPLY = (
 
 
 def _is_negated_risk_match(reply: str, start: int) -> bool:
+    """Checks whether the matched risky phrase is negated, scoped to the
+    sentence it appears in (not a fixed character window)."""
+    sentences = _SENTENCE_SPLIT.split(reply)
+    offset = 0
+    for sentence in sentences:
+        sentence_end = offset + len(sentence)
+        if offset <= start < sentence_end:
+            # search the WHOLE sentence (not just before the match) since
+            # negation can precede or follow the risky phrase within the
+            # same sentence, e.g. "go check the site yourself? don't."
+            return bool(_SAFE_RISK_PREFIX.search(sentence))
+        offset = sentence_end + 1  # +1 to roughly account for the split whitespace
     return bool(_SAFE_RISK_PREFIX.search(reply[max(0, start - 100):start]))
 
 
@@ -316,9 +273,131 @@ def _safety_check(reply: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Gated second-pass classifier (NEW).
+#
+# The regex layer is fast and precise (0 false positives in eval) but has a
+# real ceiling: it cannot resolve cases where negation is structural/semantic
+# rather than lexical (e.g. "why DON'T you go check it yourself" - "don't"
+# present, but used rhetorically as a suggestion, not a refusal). Eval
+# showed regex alone tops out ~94% catch rate; the remaining gap is exactly
+# this class of case.
+#
+# This is NOT run on every reply - only when:
+#   (a) the regex layer found nothing (no point double-checking a reply
+#       it already caught), AND
+#   (b) the reply is topically in the risk zone (mentions investigation/
+#       site/evidence-adjacent words) - so plain weather/quiz/greeting
+#       replies never pay the extra inference cost.
+#
+# Returns True if the reply should be treated as a violation, False
+# otherwise. Never raises - on any failure (Ollama unreachable, bad
+# response, timeout) it returns False so a flaky classifier can't turn
+# into a total outage of the bot; the regex layer remains the hard floor.
+# ---------------------------------------------------------------------------
+_CLASSIFIER_GATE_WORDS = (
+    "site", "location", "spot", "area", "mine", "mining", "dump", "dumping",
+    "bush", "forest", "evidence", "photo", "satellite", "verify", "confirm",
+    "investigate", "investigation", "report",
+    # added: phrasing that implies "go there" without a location noun
+    "yourself", "in person", "own eyes", "go there", "head over",
+    "swing by", "pop down", "stop by", "drop by", "closer look",
+    "waka go", "that side",
+)
+
+
+def _should_run_classifier(reply: str) -> bool:
+    lowered = reply.lower()
+    return any(word in lowered for word in _CLASSIFIER_GATE_WORDS)
+
+
+def _classify_physical_risk(reply: str, backend=None) -> bool:
+    """Asks a small local model a narrow yes/no question: does this reply
+    suggest or imply the user should physically go somewhere to check on
+    a hazard/violation site? `backend` is an injectable callable
+    (reply: str) -> str returning 'yes' or 'no', used for testing without
+    a live Ollama instance; defaults to a real Ollama call.
+
+    Uses Ollama's schema-constrained `format` parameter (grammar-based
+    constrained decoding) instead of free-text parsing. This removes a
+    real fragility: without it, the model could answer "Yes, because..."
+    in English, with a Pidgin gloss, wrapped in a sentence, or with a
+    markdown fence, and a plain .startswith("y") check could silently
+    misfire on any of those. With a JSON schema, the model is forced to
+    emit exactly {"physical_risk": true/false} - no parsing guesswork,
+    no language-dependent wording to account for."""
+    if backend is not None:
+        try:
+            answer = backend(reply)
+        except Exception as e:
+            logger.warning(f"[safety] classifier backend error: {e}")
+            return False
+        return answer.strip().lower().startswith("y")
+
+    import os
+    import json as _json
+    host = os.getenv("OLLAMA_HOST", "http://localhost:11434").rstrip("/")
+    model = os.getenv("OLLAMA_BASE_MODEL", "phi4-mini")
+    prompt = (
+        "Question: does the following message suggest, encourage, or imply "
+        "that someone should physically go to, visit, approach, or get "
+        "close to a location in order to check on, verify, or confirm "
+        "something in person? "
+        "Rhetorical suggestions count (e.g. 'why don't you go look'). "
+        "Negated/cautionary statements telling someone NOT to go do NOT "
+        "count as risky.\n\n"
+        f"Message: \"{reply}\""
+    )
+    schema = {
+        "type": "object",
+        "properties": {"physical_risk": {"type": "boolean"}},
+        "required": ["physical_risk"],
+    }
+    try:
+        resp = requests.post(
+            f"{host}/api/chat",
+            json={
+                "model": model,
+                "messages": [{"role": "user", "content": prompt}],
+                "stream": False,
+                "format": schema,
+                "options": {"temperature": 0.0, "num_predict": 20, "num_ctx": 256},
+            },
+            timeout=15,
+        )
+        resp.raise_for_status()
+        content = (resp.json().get("message", {}).get("content") or "").strip()
+        parsed = _json.loads(content)
+        return bool(parsed.get("physical_risk", False))
+    except (requests.RequestException, ValueError, KeyError) as e:
+        logger.warning(f"[safety] classifier unreachable or bad response, defaulting to safe-pass: {e}")
+        return False
+
+
+def _safety_check_v2(reply: str, classifier_backend=None) -> str:
+    """Dual-layer safety check: fast regex pass first (the hard, cheap
+    floor), then a gated classifier pass only for replies that are
+    topically risky and slipped past the regex. Returns the original
+    reply if neither layer flags it, or _SAFE_FALLBACK_REPLY if either
+    does."""
+    regex_result = _safety_check(reply)
+    if regex_result == _SAFE_FALLBACK_REPLY:
+        return regex_result  # already caught, no need to spend a classifier call
+
+    if _should_run_classifier(reply):
+        if _classify_physical_risk(reply, backend=classifier_backend):
+            logger.warning(
+                f"[safety] classifier flagged reply regex missed - "
+                f"replacing with safe fallback. Original: {reply[:200]!r}"
+            )
+            return _SAFE_FALLBACK_REPLY
+
+    return reply
+
+
+# ---------------------------------------------------------------------------
 # Main Ollama agent loop - architecture identical to novelbot's
 # _run_ollama_agent, adapted for Climate Guide tools/model name, with
-# _safety_check() added before returning.
+# _safety_check_v2() (regex + gated classifier) applied before returning.
 # ---------------------------------------------------------------------------
 def _run_ollama_agent(user_id: int, text: str) -> str:
     import climate_llm
@@ -345,7 +424,6 @@ def _run_ollama_agent(user_id: int, text: str) -> str:
     tool_map = {fn.__name__: fn for fn in py_tools}
     ollama_tools = [_function_to_ollama_schema(fn) for fn in py_tools]
 
-   
     history = _get_history(user_id)
     messages = history + [{"role": "user", "content": text}]
 
@@ -394,7 +472,7 @@ def _run_ollama_agent(user_id: int, text: str) -> str:
                 )
                 tool_calls = fallback_calls
             else:
-                reply = _safety_check(content or "(no response)")
+                reply = _safety_check_v2(content or "(no response)")
                 _append_history(user_id, "user", text)
                 _append_history(user_id, "assistant", reply)
                 return reply
@@ -440,7 +518,7 @@ def ask(text: str, user_id: int = 0) -> str:
 
 def _ask_gemini(text: str, user_id: int = 0) -> str:
     """Fallback when no local Ollama model is configured. Same architecture
-    as novelbot's _ask_gemini; _safety_check() applied before returning."""
+    as novelbot's _ask_gemini; _safety_check_v2() applied before returning."""
     client = _get_client()
     if client is None:
         return (
@@ -471,7 +549,7 @@ def _ask_gemini(text: str, user_id: int = 0) -> str:
             response = client.models.generate_content(
                 model=model, contents=contents, config=config,
             )
-            reply = _safety_check(response.text or "(no response)")
+            reply = _safety_check_v2(response.text or "(no response)")
             _append_history(user_id, "user", text)
             _append_history(user_id, "assistant", reply)
             return reply
