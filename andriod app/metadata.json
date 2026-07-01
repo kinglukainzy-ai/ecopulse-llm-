@@ -1,0 +1,6 @@
+{
+  "name": "EcoPulse",
+  "description": "EcoPulse empowers African youth with hyperlocal climate hazard alerts, hands-on OSINT environmental auditing, and real daily climate action tracker with rewards.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

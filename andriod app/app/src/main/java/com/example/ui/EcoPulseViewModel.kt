@@ -1,0 +1,228 @@
+package com.example.ui
+
+import android.app.Application
+import android.util.Log
+import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.viewModelScope
+import com.example.data.db.AppDatabase
+import com.example.data.model.*
+import com.example.data.repository.ClimateApiService
+import com.example.data.repository.EcoPulseRepository
+import kotlinx.coroutines.flow.*
+import kotlinx.coroutines.launch
+
+class EcoPulseViewModel(application: Application) : AndroidViewModel(application) {
+
+    private val repository: EcoPulseRepository
+
+    // UI state flows
+    val hazardAlerts: StateFlow<List<HazardAlert>>
+    val challenges: StateFlow<List<InvestigationChallenge>>
+    val reportedIncidents: StateFlow<List<ReportedIncident>>
+    val activities: StateFlow<List<UserActivity>>
+    val quizQuestions: StateFlow<List<QuizQuestion>>
+    val userProfile: StateFlow<UserProfile?>
+
+    // Selected navigation tab: "feed", "map", "investigate", "learn"
+    private val _currentTab = MutableStateFlow("feed")
+    val currentTab: StateFlow<String> = _currentTab.asStateFlow()
+
+    // Current active OSINT challenge being detailed (null if none selected)
+    private val _selectedChallenge = MutableStateFlow<InvestigationChallenge?>(null)
+    val selectedChallenge: StateFlow<InvestigationChallenge?> = _selectedChallenge.asStateFlow()
+
+    // Interactive AI chat guidance states
+    private val _aiGuideResponse = MutableStateFlow<String>(
+        "Habari! I am Eco, your EcoPulse AI Climate Guide. I explain complex environmental " +
+        "alerts in local terms and guide you through each OSINT investigation step. " +
+        "Tap an alert or ask a question to begin."
+    )
+    val aiGuideResponse: StateFlow<String> = _aiGuideResponse.asStateFlow()
+
+    private val _isAiLoading = MutableStateFlow(false)
+    val isAiLoading: StateFlow<Boolean> = _isAiLoading.asStateFlow()
+
+    // Server status indicator (shown in the AI Guide card)
+    private val _aiServerOnline = MutableStateFlow<Boolean?>(null) // null = unknown
+    val aiServerOnline: StateFlow<Boolean?> = _aiServerOnline.asStateFlow()
+
+    init {
+        val database = AppDatabase.getDatabase(application)
+        repository = EcoPulseRepository(database.appDao())
+
+        // Collect and expose states
+        hazardAlerts = repository.hazardAlerts.stateIn(
+            viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList()
+        )
+        challenges = repository.challenges.stateIn(
+            viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList()
+        )
+        reportedIncidents = repository.reportedIncidents.stateIn(
+            viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList()
+        )
+        activities = repository.activities.stateIn(
+            viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList()
+        )
+        quizQuestions = repository.quizQuestions.stateIn(
+            viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList()
+        )
+        userProfile = repository.userProfile.stateIn(
+            viewModelScope, SharingStarted.WhileSubscribed(5000), null
+        )
+
+        // Seed initial DB records
+        viewModelScope.launch {
+            repository.initializeDatabaseIfEmpty()
+        }
+
+        // Check bot server health in background on startup
+        viewModelScope.launch {
+            val health = ClimateApiService.health()
+            _aiServerOnline.value = health.ok
+            Log.i("EcoPulseVM", "Bot server health: ok=${health.ok} ollama=${health.ollamaReachable}")
+        }
+    }
+
+    fun selectTab(tab: String) {
+        _currentTab.value = tab
+        if (tab != "investigate") {
+            _selectedChallenge.value = null
+        }
+    }
+
+    fun selectChallenge(challenge: InvestigationChallenge?) {
+        _selectedChallenge.value = challenge
+    }
+
+    // --- Interactive Operations ---
+
+    fun upvoteIncident(incidentId: Int) {
+        viewModelScope.launch {
+            repository.upvoteIncident(incidentId)
+        }
+    }
+
+    fun submitReport(title: String, type: String, location: String, description: String, lat: Double, lng: Double) {
+        viewModelScope.launch {
+            repository.submitIncidentReport(
+                title = title,
+                type = type,
+                location = location,
+                description = description,
+                lat = lat,
+                lng = lng,
+                reporter = userProfile.value?.name ?: "Eco-Warrior"
+            )
+        }
+    }
+
+    fun advanceChallengeStep(challengeId: Int) {
+        viewModelScope.launch {
+            val updated = repository.advanceChallengeStep(challengeId)
+            _selectedChallenge.value = updated
+
+            // Ask AI Guide to narrate the next step via the bot server
+            if (updated != null) {
+                val stepPrompt = buildStepPrompt(updated)
+                askAiGuide(stepPrompt)
+            }
+        }
+    }
+
+    fun submitQuizAnswer(questionId: Int, isCorrect: Boolean, reward: Int) {
+        viewModelScope.launch {
+            repository.submitQuizAnswer(questionId, isCorrect, reward)
+        }
+    }
+
+    fun logDailyAction(actionName: String, points: Int) {
+        viewModelScope.launch {
+            repository.logDailyClimateAction(actionName, points)
+        }
+    }
+
+    fun readAlert(alertId: Int) {
+        viewModelScope.launch {
+            repository.readAlert(alertId)
+
+            // Ask the real AI bot to explain the alert
+            val alert = hazardAlerts.value.find { it.id == alertId }
+            if (alert != null) {
+                val prompt = "Give me a brief, plain-language explanation of this alert: " +
+                        "${alert.title} in ${alert.city}. Severity: ${alert.severity}. " +
+                        "Hazard type: ${alert.hazardType}. What should residents do?"
+                askAiGuide(prompt)
+            }
+        }
+    }
+
+    /**
+     * Sends a question to the EcoPulse bot server (bot/server.py → climate_agent.ask()).
+     * Falls back gracefully to keyword-based replies if the server is offline.
+     */
+    fun askAiGuide(query: String) {
+        viewModelScope.launch {
+            _isAiLoading.value = true
+            _aiGuideResponse.value = "Eco is thinking..."
+
+            val result = ClimateApiService.ask(text = query, userId = getUserId())
+
+            _isAiLoading.value = false
+            _aiGuideResponse.value = result.reply
+
+            // Update server status based on whether we got a real reply
+            _aiServerOnline.value = result.error == null
+        }
+    }
+
+    /**
+     * Fetch a real-time weather alert from the bot server's Open-Meteo integration.
+     */
+    fun askWeatherAlert(location: String) {
+        viewModelScope.launch {
+            _isAiLoading.value = true
+            _aiGuideResponse.value = "Fetching live weather data for $location..."
+
+            val alert = ClimateApiService.getWeatherAlert(location)
+            _isAiLoading.value = false
+            _aiGuideResponse.value = alert
+        }
+    }
+
+    /**
+     * Clears the conversation history on the bot server for this user.
+     */
+    fun clearAiHistory() {
+        viewModelScope.launch {
+            ClimateApiService.clearHistory(getUserId())
+            _aiGuideResponse.value = "Conversation cleared. Habari! Ask me anything about climate hazards or OSINT investigations."
+        }
+    }
+
+    // ---------------------------------------------------------------------------
+    // Private helpers
+    // ---------------------------------------------------------------------------
+
+    /** Uses a stable user id based on the profile (falls back to 0 for anonymous). */
+    private fun getUserId(): Int = userProfile.value?.id ?: 0
+
+    /**
+     * Builds a natural-language prompt for the AI to narrate an OSINT step.
+     * The actual wording comes from the AI, not hardcoded strings.
+     */
+    private fun buildStepPrompt(challenge: InvestigationChallenge): String {
+        return when (challenge.currentStep) {
+            0 -> "I'm starting an OSINT environmental audit called '${challenge.title}'. " +
+                    "Brief me on what satellite imagery analysis involves and what to look for."
+            1 -> "I just completed satellite imagery analysis for '${challenge.title}'. " +
+                    "I found suspicious clearing. Now guide me on EXIF metadata verification of the photos."
+            2 -> "I verified the EXIF geotags match the clearing location in '${challenge.title}'. " +
+                    "Now guide me on checking public land registry concessions records."
+            3 -> "Registry check is complete - no valid concessions found for '${challenge.title}'. " +
+                    "Summarize what I've proven and explain the impact of submitting this audit."
+            4 -> "I've published the verified environmental audit for '${challenge.title}'. " +
+                    "Congratulate me and explain what happens next with the audit findings."
+            else -> "Guide me through the next step of the OSINT investigation '${challenge.title}'."
+        }
+    }
+}
