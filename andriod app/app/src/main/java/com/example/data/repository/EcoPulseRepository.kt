@@ -24,6 +24,7 @@ class EcoPulseRepository(private val appDao: AppDao) {
             appDao.insertUserProfile(
                 UserProfile(
                     id = 1,
+                    remoteId = java.util.UUID.randomUUID().toString(),
                     name = "Munashe Mwangi",
                     city = "Nairobi",
                     points = 120, // Start with some initial points
@@ -31,6 +32,8 @@ class EcoPulseRepository(private val appDao: AppDao) {
                     badgesEarned = "First Alert Aware"
                 )
             )
+        } else if (profile.remoteId == null) {
+            appDao.updateUserProfile(profile.copy(remoteId = java.util.UUID.randomUUID().toString()))
         }
 
         // 2. Initialize Hazard Alerts
@@ -86,7 +89,8 @@ class EcoPulseRepository(private val appDao: AppDao) {
                         pointsReward = 150,
                         isCompleted = false,
                         isLocked = false,
-                        currentStep = 0
+                        currentStep = 0,
+                        minQuizzesCompleted = 0
                     ),
                     InvestigationChallenge(
                         title = "Unauthorized Logging: Mabira Forest Buffer",
@@ -103,7 +107,8 @@ class EcoPulseRepository(private val appDao: AppDao) {
                         pointsReward = 250,
                         isCompleted = false,
                         isLocked = true, // Locked initially until previous is completed or unlocked!
-                        currentStep = 0
+                        currentStep = 0,
+                        minQuizzesCompleted = 1 // Gate: 1 quiz completed
                     ),
                     InvestigationChallenge(
                         title = "Mercury Gold Mining Audit: Kakamega Creeks",
@@ -120,7 +125,8 @@ class EcoPulseRepository(private val appDao: AppDao) {
                         pointsReward = 400,
                         isCompleted = false,
                         isLocked = true,
-                        currentStep = 0
+                        currentStep = 0,
+                        minQuizzesCompleted = 2 // Gate: 2 quizzes completed
                     )
                 )
             )
@@ -171,8 +177,10 @@ class EcoPulseRepository(private val appDao: AppDao) {
         // 5. Initialize Reported Incidents
         val currentReports = appDao.getAllReportedIncidents().first()
         if (currentReports.isEmpty()) {
+            // These start with remoteId to prevent duplicate insertions on sync
             appDao.insertReportedIncident(
                 ReportedIncident(
+                    remoteId = "1",
                     title = "Illegal Industrial Rubble Dumping",
                     type = "Illegal Dumping",
                     location = "Gbagada Expressway, Lagos",
@@ -187,6 +195,7 @@ class EcoPulseRepository(private val appDao: AppDao) {
             )
             appDao.insertReportedIncident(
                 ReportedIncident(
+                    remoteId = "2",
                     title = "Sudden Tree Felling in Buffer Forest",
                     type = "Deforestation",
                     location = "Mau Forest West, Kenya",
@@ -242,6 +251,17 @@ class EcoPulseRepository(private val appDao: AppDao) {
                 category = category
             )
         )
+
+        // Sync profile to server (Task 4)
+        updatedProfile.remoteId?.let { remoteId ->
+            ClimateApiService.syncProfile(
+                userId = remoteId,
+                name = updatedProfile.name,
+                city = updatedProfile.city,
+                points = updatedProfile.points,
+                level = updatedProfile.level
+            )
+        }
     }
 
     // --- Core Operations ---
@@ -253,11 +273,16 @@ class EcoPulseRepository(private val appDao: AppDao) {
         if (match != null) {
             val updated = match.copy(upvotes = match.upvotes + 1)
             appDao.updateReportedIncident(updated)
+            
+            // Sync upvote to remote if it has a remote ID (Task 1)
+            updated.remoteId?.let { rId ->
+                ClimateApiService.upvoteIncidentRemote(rId)
+            }
         }
     }
 
     suspend fun submitIncidentReport(title: String, type: String, location: String, description: String, lat: Double, lng: Double, reporter: String) {
-        val report = ReportedIncident(
+        val localReport = ReportedIncident(
             title = title,
             type = type,
             location = location,
@@ -269,7 +294,31 @@ class EcoPulseRepository(private val appDao: AppDao) {
             status = "Submitted",
             upvotes = 1
         )
-        appDao.insertReportedIncident(report)
+        // Write locally first (offline-first responsiveness)
+        appDao.insertReportedIncident(localReport)
+
+        // Find the inserted incident to get its local ID
+        val inserted = appDao.getAllReportedIncidents().first().firstOrNull {
+            it.title == title && it.timestamp == localReport.timestamp
+        }
+
+        // Push to server
+        val serverId = ClimateApiService.submitIncidentRemote(
+            title = title,
+            type = type,
+            location = location,
+            description = description,
+            latitude = lat,
+            longitude = lng,
+            reporterName = reporter
+        )
+
+        if (serverId != null && inserted != null) {
+            // Update local incident with remoteId
+            val updated = inserted.copy(remoteId = serverId)
+            appDao.updateReportedIncident(updated)
+        }
+
         // Earn 50 points for reporting!
         addPointsAndLogActivity(
             title = "Reported Eco Incident",
@@ -277,6 +326,60 @@ class EcoPulseRepository(private val appDao: AppDao) {
             points = 50,
             category = "Report"
         )
+    }
+
+    suspend fun syncIncidentsFromRemote() {
+        val latestLocalIncident = appDao.getAllReportedIncidents().first().maxByOrNull { it.timestamp }
+        val since = latestLocalIncident?.timestamp ?: 0L
+
+        val remoteIncidents = ClimateApiService.fetchIncidentsRemote(since) ?: return
+
+        for (i in 0 until remoteIncidents.length()) {
+            val obj = remoteIncidents.getJSONObject(i)
+            val remoteId = obj.optInt("id").toString()
+            val title = obj.optString("title")
+            val type = obj.optString("type")
+            val location = obj.optString("location")
+            val description = obj.optString("description")
+            val latitude = obj.optDouble("latitude", 0.0)
+            val longitude = obj.optDouble("longitude", 0.0)
+            val reporterName = obj.optString("reporter_name", "Anonymous")
+            val timestamp = obj.optLong("timestamp", System.currentTimeMillis())
+            val status = obj.optString("status", "Submitted")
+            val upvotes = obj.optInt("upvotes", 0)
+
+            val existing = appDao.getIncidentByRemoteId(remoteId)
+            if (existing != null) {
+                val updated = existing.copy(
+                    title = title,
+                    type = type,
+                    location = location,
+                    description = description,
+                    latitude = latitude,
+                    longitude = longitude,
+                    reporterName = reporterName,
+                    timestamp = timestamp,
+                    status = status,
+                    upvotes = upvotes
+                )
+                appDao.updateReportedIncident(updated)
+            } else {
+                val newIncident = ReportedIncident(
+                    remoteId = remoteId,
+                    title = title,
+                    type = type,
+                    location = location,
+                    description = description,
+                    latitude = latitude,
+                    longitude = longitude,
+                    reporterName = reporterName,
+                    timestamp = timestamp,
+                    status = status,
+                    upvotes = upvotes
+                )
+                appDao.insertReportedIncident(newIncident)
+            }
+        }
     }
 
     suspend fun advanceChallengeStep(challengeId: Int): InvestigationChallenge? {
@@ -326,11 +429,16 @@ class EcoPulseRepository(private val appDao: AppDao) {
     }
 
     private suspend fun unlockNextChallenge(completedId: Int) {
-        val nextId = completedId + 1
-        val nextChallenge = appDao.getChallengeById(nextId)
-        if (nextChallenge != null && nextChallenge.isLocked) {
-            val unlocked = nextChallenge.copy(isLocked = false)
-            appDao.updateChallenge(unlocked)
+        val activeChallenges = appDao.getAllChallenges().first().sortedBy { it.id }
+        val completedQuizCount = appDao.getAllQuizQuestions().first().count { it.isCompleted }
+
+        val compIndex = activeChallenges.indexOfFirst { it.id == completedId }
+        if (compIndex != -1 && compIndex + 1 < activeChallenges.size) {
+            val nextChallenge = activeChallenges[compIndex + 1]
+            if (nextChallenge.isLocked && completedQuizCount >= nextChallenge.minQuizzesCompleted) {
+                val unlocked = nextChallenge.copy(isLocked = false)
+                appDao.updateChallenge(unlocked)
+            }
         }
     }
 
@@ -375,6 +483,18 @@ class EcoPulseRepository(private val appDao: AppDao) {
                         category = "Quiz"
                     )
                 )
+            }
+
+            // Check if we can unlock next challenges now that quiz count has increased (Task 3)
+            val activeChallenges = appDao.getAllChallenges().first().sortedBy { it.id }
+            val completedQuizCount = appDao.getAllQuizQuestions().first().count { it.isCompleted }
+            activeChallenges.forEachIndexed { index, challenge ->
+                if (challenge.isLocked) {
+                    val prevIsCompleted = if (index > 0) activeChallenges[index - 1].isCompleted else true
+                    if (prevIsCompleted && completedQuizCount >= challenge.minQuizzesCompleted) {
+                        appDao.updateChallenge(challenge.copy(isLocked = false))
+                    }
+                }
             }
         }
     }

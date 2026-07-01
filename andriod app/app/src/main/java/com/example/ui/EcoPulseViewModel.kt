@@ -27,6 +27,16 @@ class EcoPulseViewModel(application: Application) : AndroidViewModel(application
     private val _currentTab = MutableStateFlow("feed")
     val currentTab: StateFlow<String> = _currentTab.asStateFlow()
 
+    // Leaderboard state flows (Task 4)
+    private val _leaderboard = MutableStateFlow<List<LeaderboardEntry>>(emptyList())
+    val leaderboard: StateFlow<List<LeaderboardEntry>> = _leaderboard.asStateFlow()
+
+    private val _isLeaderboardLoading = MutableStateFlow(false)
+    val isLeaderboardLoading: StateFlow<Boolean> = _isLeaderboardLoading.asStateFlow()
+
+    private val _leaderboardStale = MutableStateFlow(false)
+    val leaderboardStale: StateFlow<Boolean> = _leaderboardStale.asStateFlow()
+
     // Current active OSINT challenge being detailed (null if none selected)
     private val _selectedChallenge = MutableStateFlow<InvestigationChallenge?>(null)
     val selectedChallenge: StateFlow<InvestigationChallenge?> = _selectedChallenge.asStateFlow()
@@ -73,6 +83,10 @@ class EcoPulseViewModel(application: Application) : AndroidViewModel(application
         // Seed initial DB records
         viewModelScope.launch {
             repository.initializeDatabaseIfEmpty()
+            // Sync incidents on startup (Task 1)
+            syncIncidents()
+            // Fetch initial leaderboard (Task 4)
+            refreshLeaderboard(cityOnly = true)
         }
 
         // Check bot server health in background on startup
@@ -87,6 +101,51 @@ class EcoPulseViewModel(application: Application) : AndroidViewModel(application
         _currentTab.value = tab
         if (tab != "investigate") {
             _selectedChallenge.value = null
+        }
+        if (tab == "map") {
+            syncIncidents() // Pull latest incidents from server when map tab opens (Task 1)
+        }
+    }
+
+    fun syncIncidents() {
+        viewModelScope.launch {
+            repository.syncIncidentsFromRemote()
+        }
+    }
+
+    fun refreshLeaderboard(cityOnly: Boolean) {
+        viewModelScope.launch {
+            _isLeaderboardLoading.value = true
+            val city = if (cityOnly) userProfile.value?.city.orEmpty() else ""
+            val remoteLeaderboard = ClimateApiService.fetchLeaderboard(city)
+            _isLeaderboardLoading.value = false
+            if (remoteLeaderboard != null) {
+                val myRemoteId = userProfile.value?.remoteId
+                var mapped = remoteLeaderboard.map { entry ->
+                    entry.copy(isCurrentUser = myRemoteId != null && entry.userId == myRemoteId)
+                }
+                
+                // Highlight current user even if they are outside top N
+                val alreadyInList = mapped.any { it.isCurrentUser }
+                if (!alreadyInList && myRemoteId != null) {
+                    val curProfile = userProfile.value
+                    if (curProfile != null) {
+                        mapped = mapped + LeaderboardEntry(
+                            rank = mapped.size + 1, // display as 20+ equivalent
+                            userId = myRemoteId,
+                            name = curProfile.name,
+                            city = curProfile.city,
+                            points = curProfile.points,
+                            level = curProfile.level,
+                            isCurrentUser = true
+                        )
+                    }
+                }
+                _leaderboard.value = mapped
+                _leaderboardStale.value = false
+            } else {
+                _leaderboardStale.value = true // server unreachable -> show cached last-fetched leaderboard with a stale indicator
+            }
         }
     }
 

@@ -3,12 +3,14 @@ package com.example.data.repository
 import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.OutputStreamWriter
 import java.net.HttpURLConnection
 import java.net.URL
 
 import com.example.BuildConfig
+import com.example.data.model.LeaderboardEntry
 
 /**
  * ClimateApiService - lightweight HTTP client that talks to the EcoPulse
@@ -29,9 +31,14 @@ object ClimateApiService {
      */
     val BASE_URL: String = BuildConfig.CLIMATE_API_URL.trimEnd('/')
     private const val TIMEOUT_MS = 60_000 // 60s - local CPU inference can be slow
+    private const val SHORT_TIMEOUT_MS = 10_000 // 10s for non-AI calls
 
     data class AskResult(val reply: String, val source: String, val error: String? = null)
     data class HealthResult(val ok: Boolean, val ollamaReachable: Boolean, val error: String? = null)
+
+    // -------------------------------------------------------------------------
+    // AI / Chat endpoints (unchanged)
+    // -------------------------------------------------------------------------
 
     /**
      * Ask the Climate Guide a question. Returns the AI reply or an error message.
@@ -151,6 +158,186 @@ object ClimateApiService {
             false
         }
     }
+
+    // -------------------------------------------------------------------------
+    // Incident endpoints (Task 1)
+    // -------------------------------------------------------------------------
+
+    /**
+     * Submit a new incident report to the server. Returns the server-assigned id
+     * (to be stored as remoteId on the local Room row), or null if the server
+     * is unreachable (offline-first: caller already wrote to Room).
+     */
+    suspend fun submitIncidentRemote(
+        title: String,
+        type: String,
+        location: String,
+        description: String,
+        latitude: Double,
+        longitude: Double,
+        reporterName: String
+    ): String? = withContext(Dispatchers.IO) {
+        try {
+            val body = JSONObject().apply {
+                put("title", title)
+                put("type", type)
+                put("location", location)
+                put("description", description)
+                put("latitude", latitude)
+                put("longitude", longitude)
+                put("reporter_name", reporterName)
+            }.toString()
+
+            val url = URL("$BASE_URL/incidents")
+            val conn = (url.openConnection() as HttpURLConnection).apply {
+                requestMethod = "POST"
+                setRequestProperty("Content-Type", "application/json")
+                setRequestProperty("Accept", "application/json")
+                connectTimeout = SHORT_TIMEOUT_MS
+                readTimeout = SHORT_TIMEOUT_MS
+                doOutput = true
+            }
+            OutputStreamWriter(conn.outputStream, Charsets.UTF_8).use { it.write(body) }
+
+            if (conn.responseCode !in 200..299) {
+                Log.w(TAG, "submitIncidentRemote() HTTP ${conn.responseCode}")
+                return@withContext null
+            }
+            val json = JSONObject(conn.inputStream.bufferedReader().readText())
+            conn.disconnect()
+            json.optInt("id", -1).takeIf { it > 0 }?.toString()
+        } catch (e: Exception) {
+            Log.w(TAG, "submitIncidentRemote() failed (offline?): ${e.message}")
+            null // caller handles gracefully — local Room write already succeeded
+        }
+    }
+
+    /**
+     * Fetch all incidents since a given timestamp (ms). Returns a JSONArray of
+     * incident objects, or null if the server is unreachable.
+     * Used for startup / map-tab-open incremental sync.
+     */
+    suspend fun fetchIncidentsRemote(sinceMs: Long = 0L): JSONArray? = withContext(Dispatchers.IO) {
+        try {
+            val url = URL("$BASE_URL/incidents?since=$sinceMs")
+            val conn = (url.openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"
+                connectTimeout = SHORT_TIMEOUT_MS
+                readTimeout = SHORT_TIMEOUT_MS
+            }
+            if (conn.responseCode !in 200..299) return@withContext null
+            val body = JSONObject(conn.inputStream.bufferedReader().readText())
+            conn.disconnect()
+            body.optJSONArray("incidents")
+        } catch (e: Exception) {
+            Log.w(TAG, "fetchIncidentsRemote() failed (offline?): ${e.message}")
+            null
+        }
+    }
+
+    /**
+     * Push an upvote for the given server incident id. Fire-and-forget safe —
+     * returns true on success, false on failure (server offline, etc.).
+     * Callers key off remoteId, not the local Room id.
+     */
+    suspend fun upvoteIncidentRemote(remoteId: String): Boolean = withContext(Dispatchers.IO) {
+        try {
+            val url = URL("$BASE_URL/incidents/$remoteId/upvote")
+            val conn = (url.openConnection() as HttpURLConnection).apply {
+                requestMethod = "POST"
+                connectTimeout = SHORT_TIMEOUT_MS
+                readTimeout = SHORT_TIMEOUT_MS
+            }
+            val ok = conn.responseCode in 200..299
+            conn.disconnect()
+            ok
+        } catch (e: Exception) {
+            Log.w(TAG, "upvoteIncidentRemote($remoteId) failed: ${e.message}")
+            false
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Profile & Leaderboard endpoints (Task 4)
+    // -------------------------------------------------------------------------
+
+    /**
+     * Push the local user profile to the server for leaderboard participation.
+     * Uses a stable UUID (remoteId) as the server key.
+     * Fire-and-forget safe — failure is logged but not surfaced to the user.
+     */
+    suspend fun syncProfile(
+        userId: String,
+        name: String,
+        city: String,
+        points: Int,
+        level: Int
+    ): Boolean = withContext(Dispatchers.IO) {
+        try {
+            val body = JSONObject().apply {
+                put("user_id", userId)
+                put("name", name)
+                put("city", city)
+                put("points", points)
+                put("level", level)
+            }.toString()
+
+            val url = URL("$BASE_URL/profile")
+            val conn = (url.openConnection() as HttpURLConnection).apply {
+                requestMethod = "POST"
+                setRequestProperty("Content-Type", "application/json")
+                connectTimeout = SHORT_TIMEOUT_MS
+                readTimeout = SHORT_TIMEOUT_MS
+                doOutput = true
+            }
+            OutputStreamWriter(conn.outputStream, Charsets.UTF_8).use { it.write(body) }
+            val ok = conn.responseCode in 200..299
+            conn.disconnect()
+            ok
+        } catch (e: Exception) {
+            Log.w(TAG, "syncProfile() failed (offline?): ${e.message}")
+            false
+        }
+    }
+
+    /**
+     * Fetch the leaderboard from the server. Pass city="" for global ranking,
+     * or a city name for the hyperlocal city-scoped ranking.
+     * Returns null if the server is unreachable (callers should use cached data).
+     */
+    suspend fun fetchLeaderboard(city: String = ""): List<LeaderboardEntry>? = withContext(Dispatchers.IO) {
+        try {
+            val cityParam = if (city.isNotBlank()) "?city=${java.net.URLEncoder.encode(city, "UTF-8")}" else ""
+            val url = URL("$BASE_URL/leaderboard$cityParam")
+            val conn = (url.openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"
+                connectTimeout = SHORT_TIMEOUT_MS
+                readTimeout = SHORT_TIMEOUT_MS
+            }
+            if (conn.responseCode !in 200..299) return@withContext null
+            val body = JSONObject(conn.inputStream.bufferedReader().readText())
+            conn.disconnect()
+            val arr = body.optJSONArray("leaderboard") ?: return@withContext emptyList()
+            (0 until arr.length()).map { i ->
+                val obj = arr.getJSONObject(i)
+                LeaderboardEntry(
+                    rank = obj.optInt("rank", i + 1),
+                    userId = obj.optString("user_id"),
+                    name = obj.optString("name", "Eco-Warrior"),
+                    city = obj.optString("city", ""),
+                    points = obj.optInt("points", 0),
+                    level = obj.optInt("level", 1)
+                )
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "fetchLeaderboard() failed (offline?): ${e.message}")
+            null
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Offline fallback
+    // -------------------------------------------------------------------------
 
     /**
      * Offline-capable keyword-based fallback for when the server is unreachable.

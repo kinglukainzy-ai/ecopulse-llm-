@@ -1,0 +1,22 @@
+{
+  "region_name": "Kenya",
+  "local_language": "Swahili",
+  "timezone": "Africa/Nairobi",
+  "geocode_country_code": "KE",
+  "cities": {
+    "nairobi":    [-1.2921,  36.8219],
+    "mombasa":    [-4.0435,  39.6682],
+    "kisumu":     [-0.1022,  34.7617],
+    "nakuru":     [-0.3031,  36.0800],
+    "eldoret":    [0.5143,   35.2698],
+    "thika":      [-1.0332,  37.0693],
+    "malindi":    [-3.2138,  40.1169],
+    "kitale":     [1.0154,   35.0062],
+    "garissa":    [-0.4532,  39.6466],
+    "kakamega":   [0.2827,   34.7519],
+    "nyeri":      [-0.4167,  36.9500],
+    "machakos":   [-1.5177,  37.2634],
+    "athi river": [-1.4565,  36.9794],
+    "mau forest": [-0.5833,  35.8333]
+  }
+}

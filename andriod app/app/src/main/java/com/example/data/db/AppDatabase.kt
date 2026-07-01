@@ -16,7 +16,10 @@ import com.example.data.model.*
         QuizQuestion::class,
         UserProfile::class
     ],
-    version = 1,
+    // v2: added remoteId to ReportedIncident + UserProfile (server sync),
+    //     minQuizzesCompleted to InvestigationChallenge (quiz-gate).
+    //     fallbackToDestructiveMigration() handles upgrade — no real data pre-launch.
+    version = 2,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {

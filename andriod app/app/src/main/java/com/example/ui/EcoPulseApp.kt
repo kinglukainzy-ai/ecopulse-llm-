@@ -1154,6 +1154,22 @@ fun InvestigateTab(
             items(challenges) { challenge ->
                 val cardBg = if (challenge.isLocked) Color(0xFFF5F5F5) else Color(0xFFDCE7D0)
                 val textCol = if (challenge.isLocked) Color.Gray else Color(0xFF191C19)
+                val context = LocalContext.current
+
+                // Calculate locking reason dynamically (Task 3)
+                val completedQuizCount = quizQuestions.count { it.isCompleted }
+                val neededQuizzes = challenge.minQuizzesCompleted - completedQuizCount
+
+                val sortedChallenges = challenges.sortedBy { it.id }
+                val challengeIndex = sortedChallenges.indexOfFirst { it.id == challenge.id }
+                val prevChallenge = if (challengeIndex > 0) sortedChallenges[challengeIndex - 1] else null
+                val prevCompleted = prevChallenge == null || prevChallenge.isCompleted
+
+                val lockReason = when {
+                    !prevCompleted -> "Complete the previous mission first"
+                    neededQuizzes > 0 -> "Complete $neededQuizzes more quiz${if (neededQuizzes > 1) "zes" else ""} in Learn → to unlock"
+                    else -> ""
+                }
 
                 Card(
                     modifier = Modifier
@@ -1163,8 +1179,12 @@ fun InvestigateTab(
                             if (challenge.isLocked) Color.LightGray else Color(0xFF9CD67D),
                             RoundedCornerShape(24.dp)
                         )
-                        .clickable(enabled = !challenge.isLocked) {
-                            viewModel.selectChallenge(challenge)
+                        .clickable {
+                            if (challenge.isLocked) {
+                                android.widget.Toast.makeText(context, lockReason, android.widget.Toast.LENGTH_SHORT).show()
+                            } else {
+                                viewModel.selectChallenge(challenge)
+                            }
                         }
                         .testTag("challenge_card_${challenge.id}"),
                     colors = CardDefaults.cardColors(containerColor = cardBg),
@@ -1215,6 +1235,16 @@ fun InvestigateTab(
                             lineHeight = 14.sp,
                             modifier = Modifier.padding(vertical = 4.dp)
                         )
+
+                        if (challenge.isLocked && lockReason.isNotEmpty()) {
+                            Text(
+                                text = "🔒 $lockReason",
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color(0xFFC62828),
+                                modifier = Modifier.padding(vertical = 4.dp)
+                            )
+                        }
 
                         Row(
                             modifier = Modifier.fillMaxWidth(),
@@ -1686,6 +1716,203 @@ fun LearnTab(
                                     ) {
                                         Icon(Icons.Default.Star, contentDescription = null, tint = Color(0xFFB8F396), modifier = Modifier.size(12.dp))
                                         Text(badge, color = Color.White, fontSize = 9.sp, fontWeight = FontWeight.Bold)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Leaderboard Section (Task 4)
+        item {
+            var cityOnlyFilter by remember { mutableStateOf(true) }
+            val leaderboard by viewModel.leaderboard.collectAsState()
+            val isLeaderboardLoading by viewModel.isLeaderboardLoading.collectAsState()
+            val leaderboardStale by viewModel.leaderboardStale.collectAsState()
+
+            // Fetch/refresh leaderboard when filter changes or on draw
+            LaunchedEffect(cityOnlyFilter) {
+                viewModel.refreshLeaderboard(cityOnly = cityOnlyFilter)
+            }
+
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 4.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "COMMUNITY LEADERBOARD",
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Color(0xFF191C19)
+                    )
+                    
+                    // Filter Toggle
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .background(
+                                    color = if (cityOnlyFilter) Color(0xFF386B1D) else Color(0xFFF1F5EB),
+                                    shape = RoundedCornerShape(6.dp)
+                                )
+                                .clickable { cityOnlyFilter = true }
+                                .padding(horizontal = 8.dp, vertical = 4.dp)
+                        ) {
+                            Text(
+                                text = "Your City",
+                                color = if (cityOnlyFilter) Color.White else Color(0xFF191C19),
+                                fontSize = 9.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                        Box(
+                            modifier = Modifier
+                                .background(
+                                    color = if (!cityOnlyFilter) Color(0xFF386B1D) else Color(0xFFF1F5EB),
+                                    shape = RoundedCornerShape(6.dp)
+                                )
+                                .clickable { cityOnlyFilter = false }
+                                .padding(horizontal = 8.dp, vertical = 4.dp)
+                        ) {
+                            Text(
+                                text = "Global",
+                                color = if (!cityOnlyFilter) Color.White else Color(0xFF191C19),
+                                fontSize = 9.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
+                }
+
+                if (leaderboardStale) {
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = CardDefaults.cardColors(containerColor = Color(0xFFFFDAD6)),
+                        shape = RoundedCornerShape(12.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Warning,
+                                contentDescription = "Offline indicator",
+                                tint = Color(0xFFC62828),
+                                modifier = Modifier.size(14.dp)
+                            )
+                            Text(
+                                text = "Stale leaderboard (offline caching fallback)",
+                                color = Color(0xFFC62828),
+                                fontSize = 9.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
+                }
+
+                if (isLeaderboardLoading) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(60.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        CircularProgressIndicator(
+                            color = Color(0xFF386B1D),
+                            modifier = Modifier.size(24.dp)
+                        )
+                    }
+                } else if (leaderboard.isEmpty()) {
+                    Text(
+                        text = "No leaderboard data available.",
+                        color = Color.Gray,
+                        fontSize = 11.sp,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 12.dp)
+                    )
+                } else {
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .border(1.dp, Color(0xFFDCE7D0), RoundedCornerShape(20.dp)),
+                        colors = CardDefaults.cardColors(containerColor = Color.White),
+                        shape = RoundedCornerShape(20.dp)
+                    ) {
+                        Column(modifier = Modifier.padding(8.dp)) {
+                            leaderboard.forEach { entry ->
+                                val rowBg = if (entry.isCurrentUser) Color(0xFFDCE7D0) else Color.Transparent
+                                val rowBorder = if (entry.isCurrentUser) BorderStroke(1.dp, Color(0xFF386B1D)) else null
+                                
+                                Card(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(vertical = 2.dp),
+                                    colors = CardDefaults.cardColors(containerColor = rowBg),
+                                    border = rowBorder,
+                                    shape = RoundedCornerShape(10.dp)
+                                ) {
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(horizontal = 10.dp, vertical = 6.dp),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Row(
+                                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            // Rank Badge
+                                            Box(
+                                                modifier = Modifier
+                                                    .size(20.dp)
+                                                    .background(
+                                                        color = if (entry.rank <= 3) Color(0xFF386B1D) else Color.LightGray,
+                                                        shape = CircleShape
+                                                    ),
+                                                contentAlignment = Alignment.Center
+                                            ) {
+                                                Text(
+                                                    text = "${entry.rank}",
+                                                    color = Color.White,
+                                                    fontSize = 9.sp,
+                                                    fontWeight = FontWeight.Bold
+                                                )
+                                            }
+                                            
+                                            Column {
+                                                Text(
+                                                    text = entry.name,
+                                                    fontWeight = FontWeight.Bold,
+                                                    fontSize = 11.sp,
+                                                    color = Color(0xFF191C19)
+                                                )
+                                                Text(
+                                                    text = "${entry.city} · Lvl ${entry.level}",
+                                                    fontSize = 9.sp,
+                                                    color = Color(0xFF424940)
+                                                )
+                                            }
+                                        }
+                                        
+                                        Text(
+                                            text = "${entry.points} pts",
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = Color(0xFF386B1D)
+                                        )
                                     }
                                 }
                             }

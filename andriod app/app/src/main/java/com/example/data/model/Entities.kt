@@ -32,12 +32,19 @@ data class InvestigationChallenge(
     val pointsReward: Int,
     val isCompleted: Boolean = false,
     val isLocked: Boolean = false,
-    val currentStep: Int = 0 // 0: Not started, 1: Sat done, 2: Geo done, 3: Records done, 4: Fully verified
+    val currentStep: Int = 0, // 0: Not started, 1: Sat done, 2: Geo done, 3: Records done, 4: Fully verified
+    // Quiz gate: how many quizzes must be completed before this challenge can unlock.
+    // Combined with the previous challenge being complete. Set to 0 for no quiz gate.
+    val minQuizzesCompleted: Int = 0
 )
 
 @Entity(tableName = "reported_incidents")
 data class ReportedIncident(
     @PrimaryKey(autoGenerate = true) val id: Int = 0,
+    // Server-assigned id; null until this incident has been successfully synced.
+    // All server-bound operations (upvote, status pull-back) key off remoteId,
+    // NOT the local Room id, to avoid divergence after sync (blocking issue B1).
+    val remoteId: String? = null,
     val title: String,
     val type: String, // "Illegal Dumping", "Deforestation", "Unauthorized Mining", "Other"
     val location: String,
@@ -77,9 +84,23 @@ data class QuizQuestion(
 @Entity(tableName = "user_profiles")
 data class UserProfile(
     @PrimaryKey val id: Int = 1, // Only 1 profile row
+    // Stable UUID generated client-side on first run, stored in SharedPreferences.
+    // Used to identify this install on the server for profile sync and leaderboard.
+    val remoteId: String? = null,
     val name: String = "Eco-Warrior",
     val city: String = "Nairobi",
     val points: Int = 0,
     val level: Int = 1,
     val badgesEarned: String = "" // Comma-separated list of earned badges
+)
+
+/** Leaderboard entry returned by GET /leaderboard — not a Room entity, just a data holder. */
+data class LeaderboardEntry(
+    val rank: Int,
+    val userId: String,
+    val name: String,
+    val city: String,
+    val points: Int,
+    val level: Int,
+    val isCurrentUser: Boolean = false
 )

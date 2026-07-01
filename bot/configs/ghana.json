@@ -1,0 +1,27 @@
+{
+  "region_name": "Ghana",
+  "local_language": "Ghanaian Pidgin",
+  "timezone": "Africa/Accra",
+  "geocode_country_code": "GH",
+  "cities": {
+    "accra":      [5.6037,  -0.1870],
+    "kumasi":     [6.6885,  -1.6244],
+    "tamale":     [9.4008,  -0.8393],
+    "cape coast": [5.1053,  -1.2466],
+    "tema":       [5.6698,  -0.0166],
+    "takoradi":   [4.8845,  -1.7554],
+    "sunyani":    [7.3349,  -2.3276],
+    "koforidua":  [6.0940,  -0.2607],
+    "ho":         [6.6011,   0.4712],
+    "wa":         [10.0601, -2.5099],
+    "bolgatanga": [10.7856, -0.8514],
+    "sekondi":    [4.9437,  -1.7040],
+    "ada":        [5.7860,   0.6260],
+    "keta":       [5.9100,   1.0050],
+    "korle-bu":   [5.5491,  -0.2341],
+    "lapaz":      [5.6219,  -0.2468],
+    "achimota":   [5.6317,  -0.2294],
+    "kasoa":      [5.5269,  -0.4261],
+    "ashaiman":   [5.6951,  -0.0286]
+  }
+}

@@ -33,6 +33,9 @@ interface AppDao {
     @Query("SELECT * FROM reported_incidents ORDER BY timestamp DESC")
     fun getAllReportedIncidents(): Flow<List<ReportedIncident>>
 
+    @Query("SELECT * FROM reported_incidents WHERE remoteId = :remoteId LIMIT 1")
+    suspend fun getIncidentByRemoteId(remoteId: String): ReportedIncident?
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertReportedIncident(incident: ReportedIncident)
 

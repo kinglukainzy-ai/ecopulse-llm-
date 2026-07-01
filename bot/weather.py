@@ -29,6 +29,8 @@ import logging
 import requests
 from datetime import datetime, timezone
 
+from region_config import CITIES, TIMEZONE, GEOCODE_COUNTRY_CODE
+
 logger = logging.getLogger("weather")
 
 FORECAST_URL  = "https://api.open-meteo.com/v1/forecast"
@@ -37,31 +39,11 @@ GEOCODE_URL   = "https://geocoding-api.open-meteo.com/v1/search"
 TIMEOUT       = 10  # seconds - fast APIs, no reason to wait longer
 
 # ---------------------------------------------------------------------------
-# Ghana city coordinate table - avoids a geocoding round-trip for the most
-# common inputs. Open-Meteo's geocoding API is used as a fallback for
-# anything not in this list.
+# City coordinate table - loaded from the active region config.
+# Open-Meteo's geocoding API is used as a fallback for cities not in the list.
+# To change the region: set ECOPULSE_REGION env var (e.g. "kenya").
 # ---------------------------------------------------------------------------
-GHANA_CITIES: dict[str, tuple[float, float]] = {
-    "accra":       (5.6037,  -0.1870),
-    "kumasi":      (6.6885,  -1.6244),
-    "tamale":      (9.4008,  -0.8393),
-    "cape coast":  (5.1053,  -1.2466),
-    "tema":        (5.6698,  -0.0166),
-    "takoradi":    (4.8845,  -1.7554),
-    "sunyani":     (7.3349,  -2.3276),
-    "koforidua":   (6.0940,  -0.2607),
-    "ho":          (6.6011,   0.4712),
-    "wa":          (10.0601,  -2.5099),
-    "bolgatanga":  (10.7856,  -0.8514),
-    "sekondi":     (4.9437,  -1.7040),
-    "ada":         (5.7860,   0.6260),   # coastal, flood-prone
-    "keta":        (5.9100,   1.0050),   # coastal erosion area
-    "korle-bu":    (5.5491,  -0.2341),   # Accra flood zone
-    "lapaz":       (5.6219,  -0.2468),   # Accra flood zone
-    "achimota":    (5.6317,  -0.2294),
-    "kasoa":       (5.5269,  -0.4261),
-    "ashaiman":    (5.6951,  -0.0286),
-}
+# CITIES is imported from region_config above.
 
 # ---------------------------------------------------------------------------
 # WMO weather interpretation codes used by Open-Meteo.
@@ -112,22 +94,21 @@ def _resolve_coordinates(location: str) -> tuple[float, float] | None:
         parts = stripped.split(",", 1)
         try:
             lat, lon = float(parts[0].strip()), float(parts[1].strip())
-            # sanity check: Ghana is roughly 4-11°N, 3.5°W-1.2°E
             return lat, lon
         except ValueError:
             pass  # fall through - might be "Cape Coast, Ghana" style
 
-    # known city lookup
+    # known city lookup (from active region config)
     key = stripped.lower()
-    if key in GHANA_CITIES:
-        return GHANA_CITIES[key]
+    if key in CITIES:
+        return CITIES[key]
 
-    # partial match (e.g. "Accra, Ghana" or "Greater Accra")
-    for city_name, coords in GHANA_CITIES.items():
+    # partial match (e.g. "Accra, Ghana" or "Athi River, Kenya")
+    for city_name, coords in CITIES.items():
         if city_name in key:
             return coords
 
-    # Open-Meteo geocoding fallback
+    # Open-Meteo geocoding fallback — prefer the active region's country
     try:
         resp = requests.get(
             GEOCODE_URL,
@@ -136,9 +117,12 @@ def _resolve_coordinates(location: str) -> tuple[float, float] | None:
         )
         resp.raise_for_status()
         results = resp.json().get("results") or []
-        # prefer Ghana results (country_code == "GH") if any
-        ghana = [r for r in results if r.get("country_code") == "GH"]
-        pick = (ghana or results)
+        # prefer results from the active region's country code
+        regional = (
+            [r for r in results if r.get("country_code") == GEOCODE_COUNTRY_CODE]
+            if GEOCODE_COUNTRY_CODE else []
+        )
+        pick = regional or results
         if pick:
             return pick[0]["latitude"], pick[0]["longitude"]
     except (requests.RequestException, KeyError, ValueError) as e:
@@ -246,7 +230,7 @@ def _fetch_forecast(lat: float, lon: float) -> dict | None:
                     "precipitation_sum",
                     "precipitation_probability_max",
                 ]),
-                "timezone": "Africa/Accra",   # GMT+0, Ghana's timezone
+                "timezone": TIMEZONE,  # from active region config
                 "forecast_days": 3,
             },
             timeout=TIMEOUT,
@@ -606,7 +590,10 @@ def get_active_alert(location: str) -> str:
 if __name__ == "__main__":
     import sys
     logging.basicConfig(level=logging.INFO)
-    test_locations = ["Accra", "Kumasi", "Korle-Bu", "Tamale", "Keta"]
+    # Test with the first few cities in the active region config
+    from region_config import CITIES as _CITIES, REGION_NAME as _REGION
+    test_locations = list(_CITIES.keys())[:5]
+    print(f"Testing weather for region: {_REGION}")
     for loc in test_locations:
         print(f"\n{'='*60}")
         print(f"Testing: {loc}")

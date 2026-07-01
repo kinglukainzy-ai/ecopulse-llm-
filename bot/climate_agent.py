@@ -10,6 +10,8 @@ import time
 import requests
 from collections import deque
 
+from region_config import REGION_NAME, LOCAL_LANGUAGE
+
 logger = logging.getLogger("climate_agent")
 
 _client_cache = {}
@@ -51,29 +53,108 @@ def _build_tools():
     from weather import get_active_alert
 
     def get_investigation_evidence(report_id: str) -> str:
-        return (
-            f"(STUB) No real reports backend wired up yet. Pretend response "
-            f"for report '{report_id}': 1 photo on file, geotag present, "
-            f"no satellite comparison run yet."
-        )
+        """Look up a community-submitted incident report by its server id and
+        return key evidence fields: title, status, upvote count, geotag
+        presence, and description excerpt. Use this when a user asks about
+        the status of a specific environmental report or wants to reference
+        evidence already on file."""
+        try:
+            import sqlite3
+            db_path = os.path.join(os.path.dirname(__file__), "ecopulse.db")
+            if not os.path.exists(db_path):
+                return (
+                    f"No incidents database found yet — the server hasn't started "
+                    f"or no reports have been submitted. Report id: {report_id!r}."
+                )
+            with sqlite3.connect(db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                row = conn.execute(
+                    "SELECT * FROM incidents WHERE id = ?", (report_id,)
+                ).fetchone()
+            if row is None:
+                return (
+                    f"No incident found with id={report_id!r}. "
+                    f"It may not have been synced to the server yet."
+                )
+            has_geotag = bool(row["latitude"] and row["longitude"])
+            return (
+                f"Report #{row['id']}: '{row['title']}' ({row['type']}) "
+                f"at {row['location']}. "
+                f"Status: {row['status']}. "
+                f"Upvotes: {row['upvotes']}. "
+                f"Geotag on file: {'yes' if has_geotag else 'no'} "
+                f"({row['latitude']:.4f}, {row['longitude']:.4f}). "
+                f"Photo count: 0 (no upload pipeline yet). "
+                f"Summary: {str(row['description'])[:120]}..."
+            )
+        except Exception as e:
+            logger.warning(f"[tool] get_investigation_evidence failed: {e}")
+            return f"Evidence lookup unavailable right now: {e}"
 
     def get_quiz_question(topic: str = "") -> str:
-        return (
-            f"(STUB) No real quiz bank wired up yet. Pretend question on "
-            f"topic '{topic or 'general'}': 'Which of these areas in Accra "
-            f"is known to flood most often during heavy rain?'"
-        )
+        """Retrieve a climate or OSINT literacy quiz question from the database.
+        If topic is provided, filter by it (e.g. 'flooding', 'satellite',
+        'mining'). Otherwise return a random uncompleted question. Use this
+        when a user asks for a quiz, a challenge question, or wants to test
+        their knowledge.
+        # TODO: single-source quiz questions — if app seed list in
+        # EcoPulseRepository.kt changes, the server copy goes stale silently.
+        """
+        try:
+            import sqlite3
+            import random
+            db_path = os.path.join(os.path.dirname(__file__), "ecopulse.db")
+            if not os.path.exists(db_path):
+                return "Quiz database not ready yet — start the server to initialise it."
+            with sqlite3.connect(db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                if topic:
+                    rows = conn.execute(
+                        "SELECT * FROM quiz_questions WHERE "
+                        "LOWER(question_text) LIKE ? OR LOWER(topic) LIKE ?",
+                        (f"%{topic.lower()}%", f"%{topic.lower()}%")
+                    ).fetchall()
+                else:
+                    rows = conn.execute(
+                        "SELECT * FROM quiz_questions"
+                    ).fetchall()
+            if not rows:
+                return (
+                    f"No quiz questions found"
+                    + (f" for topic '{topic}'" if topic else "") + "."
+                )
+            row = random.choice(rows)
+            options = [
+                f"A) {row['option_a']}",
+                f"B) {row['option_b']}",
+                f"C) {row['option_c']}",
+                f"D) {row['option_d']}",
+            ]
+            correct_letter = ["A", "B", "C", "D"][row["correct_answer_index"]]
+            return (
+                f"Question: {row['question_text']}\n"
+                + "\n".join(options)
+                + f"\nCorrect answer: {correct_letter}. "
+                + f"Explanation: {row['explanation_text']}"
+            )
+        except Exception as e:
+            logger.warning(f"[tool] get_quiz_question failed: {e}")
+            return f"Quiz lookup unavailable right now: {e}"
 
     return [get_active_alert, get_investigation_evidence, get_quiz_question]
 
 
+# Build SYSTEM_INSTRUCTION dynamically from the active region config so that
+# setting ECOPULSE_REGION=kenya produces a Kenya/Swahili-aware guide without
+# rebuilding the Ollama model.
 SYSTEM_INSTRUCTION = (
-    "You are Eco, the EcoPulse Climate Guide. You help young people in Ghana "
+    f"You are Eco, the EcoPulse Climate Guide. You help young people in {REGION_NAME} "
     "understand local climate hazards and walk them through verifying "
-    "suspected environmental harm using only remote, digital evidence. "
-    "VOICE: plain-spoken and warm, like a knowledgeable older sibling - "
-    "never preachy, never alarmist. Use Ghana-local context when actually "
-    "relevant. Keep replies to 2-4 sentences unless asked to go deeper. "
+    f"suspected environmental harm using only remote, digital evidence. "
+    f"VOICE: plain-spoken and warm, like a knowledgeable older sibling - "
+    f"never preachy, never alarmist. Use {REGION_NAME}-local context and "
+    f"{LOCAL_LANGUAGE} phrases when actually relevant and helpful. "
+    "Keep replies to 2-4 sentences unless asked to go deeper. "
     "HARD SAFETY RULE, OVERRIDES EVERYTHING: never suggest, encourage, or "
     "imply that a user should physically approach, enter, or get close to "
     "a hazard site, unstable terrain, an illegal dumping ground, or an "
@@ -425,7 +506,14 @@ def _run_ollama_agent(user_id: int, text: str) -> str:
     ollama_tools = [_function_to_ollama_schema(fn) for fn in py_tools]
 
     history = _get_history(user_id)
-    messages = history + [{"role": "user", "content": text}]
+    # Prepend the system instruction so it overrides the baked-in Modelfile
+    # SYSTEM block at runtime — critical for region-switching (ECOPULSE_REGION)
+    # without rebuilding the Ollama model. (Blocking issue B2)
+    messages = (
+        [{"role": "system", "content": SYSTEM_INSTRUCTION}]
+        + history
+        + [{"role": "user", "content": text}]
+    )
 
     model = os.getenv("OLLAMA_MODEL", "ecopulse-guide")
     host = climate_llm._ollama_host()
