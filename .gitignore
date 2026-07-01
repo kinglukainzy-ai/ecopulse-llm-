@@ -1,8 +1,38 @@
-node_modules/
-build/
-dist/
-coverage/
-.DS_Store
-*.log
+# Environments and Secrets
 .env*
 !.env.example
+*.jks
+*.keystore
+local.properties
+
+# Android & Gradle
+.gradle/
+build/
+*/build/
+captures/
+.externalNativeBuild
+.cxx
+*.apk
+*.ap_
+*.aab
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+ENV/
+.pytest_cache/
+
+# Node (if applicable in the future)
+node_modules/
+dist/
+coverage/
+
+# IDEs and OS files
+.DS_Store
+.idea/
+*.iml
+.vscode/
+*.log
