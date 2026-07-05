@@ -24,6 +24,17 @@ Environment variables (same as .env):
     SERVER_HOST          - Host to bind to (default: 0.0.0.0)
     ECOPULSE_REGION      - Region config to load (default: ghana)
     ECOPULSE_ADMIN_TOKEN - Secret for write-protected admin endpoints (default: unset = disabled)
+
+ORGANIZATION DASHBOARD:
+    A read-only-by-default incident dashboard lives at bot/static/index.html
+    and is mounted below at GET /dashboard. It's the pull-model handoff for
+    the "reports go to organizations" step of the flow: an NGO/assembly
+    staffer opens /dashboard, sees submitted reports (same GET /incidents
+    data the Android app's map already uses), and can advance a report's
+    status using the *existing* PATCH /incidents/{id}/status endpoint —
+    gated behind the same ECOPULSE_ADMIN_TOKEN that already protects it.
+    This isn't a new auth system, just a UI on top of endpoints that
+    already existed.
 """
 
 import logging
@@ -51,6 +62,8 @@ logger = logging.getLogger("ecopulse_server")
 try:
     from fastapi import FastAPI, HTTPException, Header, Request
     from fastapi.middleware.cors import CORSMiddleware
+    from fastapi.staticfiles import StaticFiles
+    from fastapi.responses import RedirectResponse
     from pydantic import BaseModel
     import uvicorn
 except ImportError:
@@ -369,11 +382,26 @@ def create_incident(incident: IncidentCreate):
         raise HTTPException(status_code=500, detail=f"Database error: {e}")
 
 
+@app.get("/admin/verify", summary="Verify an admin token (no side effects)")
+def verify_admin_token(x_admin_token: str | None = Header(default=None)):
+    """
+    Checks whether X-Admin-Token matches ECOPULSE_ADMIN_TOKEN, without
+    changing anything. Exists purely so the org dashboard's login modal can
+    validate a token immediately (clear success/failure) instead of only
+    finding out it's wrong the first time someone clicks a status button.
+    """
+    _require_admin(x_admin_token)
+    return {"valid": True}
+
+
 @app.get("/incidents", summary="List all incident reports")
 def list_incidents(since: int = 0):
     """
     Return all incidents, newest first. Supports optional ?since=<timestamp_ms>
     for incremental sync — only returns incidents created after that timestamp.
+
+    This is also what the org dashboard (GET /dashboard) reads from — same
+    endpoint the Android app's map already uses, no separate org-facing API.
     """
     try:
         with _get_db() as conn:
@@ -413,6 +441,10 @@ def update_incident_status(
     Requires X-Admin-Token header matching ECOPULSE_ADMIN_TOKEN env var.
     This endpoint is the hook for local assemblies/NGOs — it is intentionally
     not open to regular app clients to protect data integrity (Blocking issue B3).
+
+    As of the org dashboard addition, this is the SAME endpoint the dashboard's
+    "Mark In Investigation" / "Mark Verified" buttons call — no separate
+    write path was added, the dashboard is just a UI on top of this.
     """
     _require_admin(x_admin_token)
     valid_statuses = {"Submitted", "In Investigation", "Verified"}
@@ -501,6 +533,27 @@ def get_leaderboard(city: str = "", limit: int = 20):
 
 
 # ---------------------------------------------------------------------------
+# Organization dashboard — static page + convenience redirect
+# ---------------------------------------------------------------------------
+# Mounted AFTER all API routes above so the "/incidents", "/health" etc.
+# paths are matched first; StaticFiles only handles what falls under the
+# /dashboard prefix.
+
+_STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
+if os.path.isdir(_STATIC_DIR):
+    app.mount("/dashboard", StaticFiles(directory=_STATIC_DIR, html=True), name="dashboard")
+else:
+    logger.warning(f"[dashboard] static dir not found at {_STATIC_DIR} — /dashboard will 404")
+
+
+@app.get("/", include_in_schema=False)
+def root_redirect():
+    """Convenience: opening the bare server URL in a browser goes straight
+    to the org dashboard instead of a bare 404/JSON blob."""
+    return RedirectResponse(url="/dashboard")
+
+
+# ---------------------------------------------------------------------------
 # Startup log
 # ---------------------------------------------------------------------------
 
@@ -523,6 +576,7 @@ def on_startup():
     logger.info(f"  Gemini key       : {'SET ✓' if gemini_key else 'not set'}")
     logger.info(f"  Admin token      : {'SET ✓ (PATCH /incidents/*/status enabled)' if admin_token_set else 'NOT SET — PATCH /status is disabled (safe default)'}")
     logger.info(f"  DB path          : {DB_PATH}")
+    logger.info(f"  Org dashboard    : http://localhost:{os.getenv('SERVER_PORT', 8000)}/dashboard")
     logger.info("  Android emulator endpoint : http://10.0.2.2:8000")
     logger.info("=" * 60)
 

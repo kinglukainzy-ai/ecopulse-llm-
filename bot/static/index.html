@@ -1,0 +1,478 @@
+<!DOCTYPE html>
+<!--
+  dashboard/index.html — EcoPulse Organization Dashboard
+
+  This is the "org handoff" piece of the reporting flow: incidents submitted
+  in the Android app land in bot/server.py's SQLite DB via POST /incidents.
+  Until now nothing pulled that data out again except direct API calls.
+  This page is the pull-model dashboard (Option A from the reporting-flow
+  discussion) — an NGO/assembly staffer opens this URL, sees submitted
+  reports, and can move them through Submitted -> In Investigation ->
+  Verified using the *existing* PATCH /incidents/{id}/status endpoint.
+
+  AUTH MODEL — matches what's already in server.py, nothing new invented:
+    - Reading incidents (GET /incidents) is already open to anyone, same
+      as it is for the Android app's map. No login needed just to view.
+    - Changing status (PATCH .../status) already requires X-Admin-Token
+      per _require_admin() in server.py. This page just asks for that same
+      token and stores it in localStorage for convenience — it is NOT a
+      real user/org account system, it's the same shared admin secret
+      that's already in ECOPULSE_ADMIN_TOKEN. Good enough for a hackathon
+      demo / a single trusted org; a real multi-org rollout would need
+      per-org accounts instead of one shared token (flagging that
+      explicitly so it isn't mistaken for real auth later).
+
+  SERVED AT: /dashboard  (see the StaticFiles mount added to server.py)
+-->
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>EcoPulse — Organization Dashboard</title>
+<style>
+  :root {
+    --eco-green-dark: #0F3D1E;
+    --eco-green-primary: #1E7D32;
+    --eco-green-light: #B7F397;
+    --eco-green-surface: #E8F5E9;
+    --eco-green-pale: #F3F8EF;
+    --eco-navy-dark: #122A22;
+    --eco-red: #E5433D;
+    --eco-red-surface: #FCE3E1;
+    --eco-orange: #FFA733;
+    --eco-orange-surface: #FFF2E0;
+    --eco-blue: #2FA9E8;
+    --eco-blue-surface: #E3F3FC;
+    --eco-text-primary: #191C19;
+    --eco-text-secondary: #5B6B5E;
+    --eco-divider: #DCE7D0;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    font-family: -apple-system, "Segoe UI", Roboto, "Poppins", sans-serif;
+    background: var(--eco-green-pale);
+    color: var(--eco-text-primary);
+  }
+
+  header {
+    background: var(--eco-green-dark);
+    color: white;
+    padding: 20px 24px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 12px;
+  }
+  header .brand { display: flex; align-items: center; gap: 10px; }
+  .dot { width: 34px; height: 34px; border-radius: 50%; object-fit: cover; background: var(--eco-green-primary); display: flex; align-items: center; justify-content: center; font-size: 18px; }
+
+  .modal-overlay {
+    display: none; position: fixed; inset: 0; background: rgba(15,61,30,0.55);
+    align-items: center; justify-content: center; z-index: 50;
+  }
+  .modal-overlay.open { display: flex; }
+  .modal-box {
+    background: white; border-radius: 20px; padding: 24px; width: 320px;
+    display: flex; flex-direction: column; gap: 10px;
+  }
+  .modal-box h2 { margin: 0; font-size: 16px; }
+  .modal-box p { margin: 0; font-size: 12px; color: var(--eco-text-secondary); line-height: 1.5; }
+  .modal-box input { width: 100%; padding: 10px; border-radius: 10px; border: 1px solid var(--eco-divider); font-size: 13px; }
+  .modal-box .modal-actions { display: flex; gap: 8px; margin-top: 6px; }
+  .modal-box .modal-actions button { flex: 1; padding: 10px; }
+  #login-error { color: var(--eco-red); font-size: 11px; display: none; }
+  header h1 { font-size: 17px; margin: 0; font-weight: 700; }
+  header .subtitle { font-size: 12px; color: var(--eco-green-light); margin: 0; }
+
+  #status-pill {
+    font-size: 11px; font-weight: 700; padding: 5px 10px; border-radius: 999px;
+    display: flex; align-items: center; gap: 6px;
+  }
+  #status-pill.online { background: rgba(183,243,151,0.15); color: var(--eco-green-light); }
+  #status-pill.offline { background: rgba(229,67,61,0.2); color: #ffb4ae; }
+  #status-pill .dot2 { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+
+  main { max-width: 1100px; margin: 0 auto; padding: 20px 16px 60px; }
+
+  .stats-row {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 12px;
+    margin-bottom: 20px;
+  }
+  .stat-card {
+    background: white; border: 1px solid var(--eco-divider); border-radius: 16px;
+    padding: 14px 16px;
+  }
+  .stat-card .value { font-size: 26px; font-weight: 800; }
+  .stat-card .label { font-size: 12px; color: var(--eco-text-secondary); font-weight: 600; }
+  .stat-card.submitted .value { color: var(--eco-orange); }
+  .stat-card.investigating .value { color: var(--eco-blue); }
+  .stat-card.verified .value { color: var(--eco-green-primary); }
+
+  .toolbar {
+    display: flex; flex-wrap: wrap; gap: 10px; align-items: center;
+    margin-bottom: 16px;
+  }
+  .chip-group { display: flex; gap: 6px; flex-wrap: wrap; }
+  .chip {
+    border: none; border-radius: 999px; padding: 7px 14px; font-size: 12px;
+    font-weight: 700; cursor: pointer; background: var(--eco-green-surface);
+    color: var(--eco-green-primary);
+  }
+  .chip.active { background: var(--eco-green-primary); color: white; }
+
+  select, input[type=password] {
+    border: 1px solid var(--eco-divider); border-radius: 10px; padding: 8px 10px;
+    font-size: 12px; font-family: inherit; background: white;
+  }
+
+  .spacer { flex: 1; }
+
+  #token-status { font-size: 11px; font-weight: 700; display: inline-flex; align-items: center; }
+  #token-status.locked { color: var(--eco-text-secondary); }
+  #token-status.unlocked { color: var(--eco-green-primary); }
+
+  button.primary {
+    background: var(--eco-green-primary); color: white; border: none;
+    border-radius: 10px; padding: 8px 14px; font-size: 12px; font-weight: 700; cursor: pointer;
+  }
+  button.ghost {
+    background: transparent; border: 1px solid var(--eco-divider); border-radius: 10px;
+    padding: 8px 14px; font-size: 12px; font-weight: 700; cursor: pointer; color: var(--eco-text-primary);
+  }
+
+  #incident-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+    gap: 14px;
+  }
+
+  .card {
+    background: white; border: 1px solid var(--eco-divider); border-radius: 18px;
+    padding: 16px; display: flex; flex-direction: column; gap: 8px;
+  }
+  .card .row-top { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; }
+  .type-tag { font-size: 10px; font-weight: 800; color: var(--eco-green-primary); text-transform: uppercase; letter-spacing: .03em; }
+  .status-badge { font-size: 10px; font-weight: 800; padding: 4px 9px; border-radius: 999px; white-space: nowrap; }
+  .status-badge.Submitted { background: var(--eco-orange-surface); color: #B5680A; }
+  .status-badge.In.Investigation, .status-badge[data-status="In Investigation"] { background: var(--eco-blue-surface); color: #0B6FA3; }
+  .status-badge.Verified, .status-badge[data-status="Verified"] { background: var(--eco-green-surface); color: var(--eco-green-primary); }
+
+  .card h3 { margin: 0; font-size: 15px; }
+  .card .meta { font-size: 11px; color: var(--eco-text-secondary); }
+  .card .desc { font-size: 12.5px; color: var(--eco-text-primary); line-height: 1.4; }
+  .card .footer-row { display: flex; justify-content: space-between; align-items: center; margin-top: 4px; font-size: 11px; color: var(--eco-text-secondary); }
+  .card .actions { display: flex; gap: 8px; margin-top: 6px; }
+  .card .actions button {
+    flex: 1; font-size: 11px; padding: 7px 8px; border-radius: 8px; border: none;
+    font-weight: 700; cursor: pointer;
+  }
+  .card .actions button.to-investigating { background: var(--eco-blue-surface); color: #0B6FA3; }
+  .card .actions button.to-verified { background: var(--eco-green-surface); color: var(--eco-green-primary); }
+  .card .actions button:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  .empty {
+    text-align: center; padding: 60px 20px; color: var(--eco-text-secondary);
+  }
+  .empty .mascot-dot {
+    width: 56px; height: 56px; border-radius: 50%; background: var(--eco-green-surface);
+    display: flex; align-items: center; justify-content: center; font-size: 26px;
+    margin: 0 auto 12px;
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="brand">
+    <img src="logo.png" alt="EcoPulse" class="dot" id="brand-logo" />
+    <div>
+      <h1>EcoPulse — Organization Dashboard</h1>
+      <p class="subtitle">Incoming environmental audit reports</p>
+    </div>
+  </div>
+  <div style="display:flex; align-items:center; gap:12px;">
+    <div id="status-pill" class="offline"><span class="dot2"></span><span id="status-text">Checking server...</span></div>
+    <button class="ghost" id="admin-login-btn" style="border-color: rgba(255,255,255,0.3); color: white; display:flex; align-items:center;">Admin Login</button>
+  </div>
+</header>
+
+<main>
+  <div class="stats-row">
+    <div class="stat-card"><div class="value" id="stat-total">—</div><div class="label">Total Reports</div></div>
+    <div class="stat-card submitted"><div class="value" id="stat-submitted">—</div><div class="label">Submitted</div></div>
+    <div class="stat-card investigating"><div class="value" id="stat-investigating">—</div><div class="label">In Investigation</div></div>
+    <div class="stat-card verified"><div class="value" id="stat-verified">—</div><div class="label">Verified</div></div>
+  </div>
+
+  <div class="toolbar">
+    <div class="chip-group" id="status-filters">
+      <button class="chip active" data-status="All">All</button>
+      <button class="chip" data-status="Submitted">Submitted</button>
+      <button class="chip" data-status="In Investigation">In Investigation</button>
+      <button class="chip" data-status="Verified">Verified</button>
+    </div>
+
+    <select id="type-filter">
+      <option value="All">All Types</option>
+      <option value="Illegal Dumping">Illegal Dumping</option>
+      <option value="Deforestation">Deforestation</option>
+      <option value="Unauthorized Mining">Unauthorized Mining</option>
+    </select>
+
+    <div class="spacer"></div>
+
+    <span id="token-status" class="locked">View-only — not signed in</span>
+    <button class="primary" id="refresh-btn">Refresh</button>
+  </div>
+
+  <div id="incident-grid"></div>
+  <div id="empty-state" class="empty" style="display:none;">
+    <div class="mascot-dot" id="empty-icon"></div>
+    <div>No reports match this filter yet.</div>
+  </div>
+</main>
+
+<div class="modal-overlay" id="login-modal">
+  <div class="modal-box">
+    <h2 id="modal-heading">Admin Login</h2>
+    <p>
+      Enter the admin token to unlock status-change actions (Mark In Investigation / Mark Verified).
+      This is the same value as <code>ECOPULSE_ADMIN_TOKEN</code> in the server's <code>.env</code> file —
+      ask whoever runs the EcoPulse server for it if you don't have it.
+    </p>
+    <input type="password" id="admin-token" placeholder="Admin token" />
+    <div id="login-error">Wrong token — try again, or check with your admin.</div>
+    <div class="modal-actions">
+      <button class="ghost" id="login-cancel">Cancel</button>
+      <button class="primary" id="login-submit">Log In</button>
+    </div>
+  </div>
+</div>
+
+<script>
+  // Small inline icon set — exact MIT-licensed Lucide SVG paths (fetched from
+  // github.com/lucide-icons/lucide), embedded directly rather than pulled
+  // from a CDN so the dashboard has zero external network dependency at
+  // runtime (matches this project's offline-first design elsewhere).
+  const ICON_SVG = (path, size = 14) =>
+    `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px; margin-right:4px;">${path}</svg>`;
+
+  const ICONS = {
+    lock: ICON_SVG('<rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>'),
+    logOut: ICON_SVG('<path d="m16 17 5-5-5-5"/><path d="M21 12H9"/><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/>'),
+    shieldCheck: ICON_SVG('<path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="m9 12 2 2 4-4"/>'),
+    refreshCw: ICON_SVG('<path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/>'),
+    thumbsUp: ICON_SVG('<path d="M15 5.88 14 10h5.83a2 2 0 0 1 1.92 2.56l-2.33 8A2 2 0 0 1 17.5 22H4a2 2 0 0 1-2-2v-8a2 2 0 0 1 2-2h2.76a2 2 0 0 0 1.79-1.11L12 2a3.13 3.13 0 0 1 3 3.88Z"/><path d="M7 10v12"/>'),
+    globe: ICON_SVG('<circle cx="12" cy="12" r="10"/><path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20"/><path d="M2 12h20"/>'),
+    sprout: ICON_SVG('<path d="M14 9.536V7a4 4 0 0 1 4-4h1.5a.5.5 0 0 1 .5.5V5a4 4 0 0 1-4 4 4 4 0 0 0-4 4c0 2 1 3 1 5a5 5 0 0 1-1 3"/><path d="M4 9a5 5 0 0 1 8 4 5 5 0 0 1-8-4"/><path d="M5 21h14"/>'),
+  };
+
+  // Same-origin by default since this is served by server.py itself via
+  // StaticFiles mount — override via ?api=http://host:port if hosting the
+  // dashboard separately from the API for some reason.
+  const params = new URLSearchParams(window.location.search);
+  const API_BASE = params.get('api') || '';
+
+  let allIncidents = [];
+  let activeStatus = 'All';
+  let activeType = 'All';
+
+  const tokenStatusEl = document.getElementById('token-status');
+  const loginModal = document.getElementById('login-modal');
+  const loginBtn = document.getElementById('admin-login-btn');
+  const loginError = document.getElementById('login-error');
+
+  function currentToken() { return localStorage.getItem('ecopulse_admin_token') || ''; }
+
+  function refreshLoginUi() {
+    const token = currentToken();
+    if (token) {
+      tokenStatusEl.innerHTML = ICONS.shieldCheck + 'Signed in as Admin';
+      tokenStatusEl.className = 'unlocked';
+      loginBtn.innerHTML = ICONS.logOut + 'Log Out';
+    } else {
+      tokenStatusEl.innerHTML = ICONS.lock + 'View-only — not signed in';
+      tokenStatusEl.className = 'locked';
+      loginBtn.innerHTML = ICONS.lock + 'Admin Login';
+    }
+  }
+
+  loginBtn.addEventListener('click', () => {
+    if (currentToken()) {
+      // already signed in -> this click means log out
+      localStorage.removeItem('ecopulse_admin_token');
+      refreshLoginUi();
+      render();
+      return;
+    }
+    loginError.style.display = 'none';
+    document.getElementById('admin-token').value = '';
+    loginModal.classList.add('open');
+  });
+  document.getElementById('login-cancel').addEventListener('click', () => {
+    loginModal.classList.remove('open');
+  });
+  document.getElementById('login-submit').addEventListener('click', async () => {
+    const candidate = document.getElementById('admin-token').value.trim();
+    if (!candidate) return;
+    try {
+      const res = await fetch(`${API_BASE}/admin/verify`, {
+        headers: { 'X-Admin-Token': candidate },
+      });
+      if (res.ok) {
+        localStorage.setItem('ecopulse_admin_token', candidate);
+        loginModal.classList.remove('open');
+        refreshLoginUi();
+        render();
+      } else {
+        loginError.style.display = 'block';
+      }
+    } catch (e) {
+      loginError.textContent = `Couldn't reach the server to verify: ${e}`;
+      loginError.style.display = 'block';
+    }
+  });
+
+  document.querySelectorAll('#status-filters .chip').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('#status-filters .chip').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      activeStatus = btn.dataset.status;
+      render();
+    });
+  });
+  document.getElementById('type-filter').addEventListener('change', (e) => {
+    activeType = e.target.value;
+    render();
+  });
+  document.getElementById('refresh-btn').addEventListener('click', fetchIncidents);
+
+  async function checkHealth() {
+    const pill = document.getElementById('status-pill');
+    const text = document.getElementById('status-text');
+    try {
+      const res = await fetch(`${API_BASE}/health`);
+      const data = await res.json();
+      pill.className = 'online';
+      text.textContent = data.ollama_reachable ? 'Server online (AI ready)' : 'Server online';
+    } catch (e) {
+      pill.className = 'offline';
+      text.textContent = 'Server unreachable';
+    }
+  }
+
+  async function fetchIncidents() {
+    try {
+      const res = await fetch(`${API_BASE}/incidents`);
+      const data = await res.json();
+      allIncidents = (data.incidents || []).sort((a, b) => b.timestamp - a.timestamp);
+      render();
+    } catch (e) {
+      document.getElementById('incident-grid').innerHTML = '';
+      const empty = document.getElementById('empty-state');
+      empty.style.display = 'block';
+      empty.querySelector('div:last-child').textContent =
+        `Couldn't reach the EcoPulse server. Is bot/server.py running? (${e})`;
+    }
+  }
+
+  async function updateStatus(id, newStatus) {
+    const token = localStorage.getItem('ecopulse_admin_token') || '';
+    if (!token) { alert('Enter the admin token first to change status.'); return; }
+    try {
+      const res = await fetch(`${API_BASE}/incidents/${id}/status`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', 'X-Admin-Token': token },
+        body: JSON.stringify({ status: newStatus }),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        alert(`Failed: ${res.status} ${body.detail || ''}`);
+        return;
+      }
+      await fetchIncidents();
+    } catch (e) {
+      alert(`Network error: ${e}`);
+    }
+  }
+
+  function fmtTime(ms) {
+    const d = new Date(ms);
+    return d.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+  }
+
+  function render() {
+    const hasToken = !!localStorage.getItem('ecopulse_admin_token');
+    const filtered = allIncidents.filter(i =>
+      (activeStatus === 'All' || i.status === activeStatus) &&
+      (activeType === 'All' || i.type === activeType)
+    );
+
+    document.getElementById('stat-total').textContent = allIncidents.length;
+    document.getElementById('stat-submitted').textContent = allIncidents.filter(i => i.status === 'Submitted').length;
+    document.getElementById('stat-investigating').textContent = allIncidents.filter(i => i.status === 'In Investigation').length;
+    document.getElementById('stat-verified').textContent = allIncidents.filter(i => i.status === 'Verified').length;
+
+    const grid = document.getElementById('incident-grid');
+    const empty = document.getElementById('empty-state');
+
+    if (filtered.length === 0) {
+      grid.innerHTML = '';
+      empty.style.display = 'block';
+      empty.querySelector('div:last-child').textContent = 'No reports match this filter yet.';
+      return;
+    }
+    empty.style.display = 'none';
+
+    grid.innerHTML = filtered.map(i => `
+      <div class="card">
+        <div class="row-top">
+          <span class="type-tag">${escapeHtml(i.type)}</span>
+          <span class="status-badge" data-status="${escapeHtml(i.status)}">${escapeHtml(i.status)}</span>
+        </div>
+        <h3>${escapeHtml(i.title)}</h3>
+        <div class="meta">${escapeHtml(i.location)} • ${i.latitude?.toFixed(4)}, ${i.longitude?.toFixed(4)}</div>
+        <div class="desc">${escapeHtml(i.description)}</div>
+        <div class="footer-row">
+          <span>Reported by ${escapeHtml(i.reporter_name)}</span>
+          <span>${fmtTime(i.timestamp)} • ${ICONS.thumbsUp}${i.upvotes}</span>
+        </div>
+        <div class="actions">
+          <button class="to-investigating" ${!hasToken || i.status !== 'Submitted' ? 'disabled' : ''}
+            onclick="updateStatus(${i.id}, 'In Investigation')">Mark In Investigation</button>
+          <button class="to-verified" ${!hasToken || i.status === 'Verified' ? 'disabled' : ''}
+            onclick="updateStatus(${i.id}, 'Verified')">Mark Verified</button>
+        </div>
+      </div>
+    `).join('');
+  }
+
+  function escapeHtml(str) {
+    if (str === null || str === undefined) return '';
+    return String(str)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;').replace(/'/g, '&#039;');
+  }
+
+  document.getElementById('modal-heading').innerHTML = ICONS.lock + 'Admin Login';
+  document.getElementById('empty-icon').innerHTML = ICONS.sprout.replace('width="14" height="14"', 'width="26" height="26"');
+  document.getElementById('refresh-btn').innerHTML = ICONS.refreshCw + 'Refresh';
+  document.getElementById('brand-logo').addEventListener('error', function () {
+    this.outerHTML = `<div class="dot">${ICONS.globe.replace('width="14" height="14"', 'width="18" height="18"').replace('margin-right:4px;', '')}</div>`;
+  }, { once: true });
+
+  refreshLoginUi();
+  checkHealth();
+  fetchIncidents();
+  setInterval(checkHealth, 15000);
+  setInterval(fetchIncidents, 20000);
+</script>
+
+</body>
+</html>
