@@ -103,7 +103,52 @@ confirm() {
 # ---------------------------------------------------------------------------
 
 print_help() {
-  sed -n '2,49p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  cat <<'EOF'
+setup.sh — EcoPulse backend installer.
+
+Goal: running this once on a fresh clone should leave you with a fully
+working, verified backend — not just "dependencies installed," but an
+actual proof that the server boots and answers requests. Specifically:
+
+  1. System prerequisites (curl, python3-venv-equivalent) — detected and,
+     with confirmation, installed via whichever package manager exists
+     (dnf/apt/pacman/brew)
+  2. Python version check — this codebase uses `str | None` union syntax
+     directly (no `from __future__ import annotations`), which needs
+     Python >= 3.10 at runtime, not just under a type checker
+  3. Virtual environment + pip install -r requirements.txt
+  4. .env generation from env.example, with a REAL random admin token
+     generated fresh (not the placeholder committed in env.example)
+  5. SQLite database initialization — creates ecopulse.db with all
+     tables and seeded quiz questions, by calling the server's own
+     _init_db() directly, so the DB exists and is verified *before* you
+     ever run `python server.py` for the first time
+  6. Ollama install (if missing) + daemon start + model pull + build the
+     custom `ecopulse-guide` model from Modelfile.ecopulse
+  7. A REAL live-boot smoke test: starts the actual server as a
+     background process, polls /health and /dashboard until they
+     respond, then shuts it down cleanly — proves the whole stack
+     actually works end to end, not just that imports succeed
+  8. Hands off into a real, persistent server run (Ctrl+C to stop) —
+     this is genuinely an install-AND-start script, not just an
+     installer that tells you the command to run yourself. Pass
+     --no-start if you just want the install/verify steps (e.g. in CI).
+
+Safe to re-run at any point: every step checks "is this already done?"
+before doing it. A partial failure halfway through won't redo finished
+work, and re-running won't regenerate your admin token or wipe your
+database (use --force-env / --reset-db to force those specifically).
+
+USAGE:
+  ./setup.sh                          # ghana region, interactive, install + start
+  ./setup.sh --region kenya
+  ./setup.sh --skip-ollama            # Gemini-only setup, no local model
+  ./setup.sh --gemini-key sk-...      # also wire up Gemini fallback
+  ./setup.sh --reset-db               # wipe and recreate ecopulse.db
+  ./setup.sh --no-start               # install/verify only, don't launch the server at the end
+  ./setup.sh -y                       # non-interactive (assume yes everywhere)
+  ./setup.sh --with-benchmark-models  # also pull the models benchmark.py compares
+EOF
 }
 
 while [[ $# -gt 0 ]]; do
@@ -172,10 +217,18 @@ get_pid_on_port() {
 port_in_use() { [[ -n "$(get_pid_on_port "$1")" ]]; }
 
 TEST_SERVER_PID=""
+SMOKETEST_PID_FILE="$BOT_DIR/.smoketest.pid"
 cleanup_test_server() {
-  if [[ -n "$TEST_SERVER_PID" ]]; then
-    kill "$TEST_SERVER_PID" 2>/dev/null || true
-    wait "$TEST_SERVER_PID" 2>/dev/null || true
+  # Prefer the pidfile written by the subshell (avoids lsof race); fall back
+  # to the in-memory variable if the file isn't there for some reason.
+  local pid_to_kill="$TEST_SERVER_PID"
+  if [[ -f "$SMOKETEST_PID_FILE" ]]; then
+    pid_to_kill="$(cat "$SMOKETEST_PID_FILE" 2>/dev/null || true)"
+    rm -f "$SMOKETEST_PID_FILE"
+  fi
+  if [[ -n "$pid_to_kill" ]]; then
+    kill "$pid_to_kill" 2>/dev/null || true
+    wait "$pid_to_kill" 2>/dev/null || true
     TEST_SERVER_PID=""
   fi
 }
@@ -510,7 +563,13 @@ else
   if port_in_use "$SERVER_PORT"; then
     warn "Port $SERVER_PORT is already in use — skipping live boot test. (Something's already listening there; if that's a previous EcoPulse instance, this is probably fine.)"
   else
-    ( cd "$BOT_DIR" && ECOPULSE_REGION="$REGION" nohup "$RUN_PYTHON" server.py >"$BOT_DIR/.setup-smoketest.log" 2>&1 & )
+    rm -f "$SMOKETEST_PID_FILE"
+    # Fork the server and immediately record its PID to a file — this avoids
+    # the race where get_pid_on_port (lsof/fuser) hasn't seen the new process
+    # yet by the time we try to read it, causing cleanup_test_server to be a
+    # silent no-op and leaking the background process.
+    ( cd "$BOT_DIR" && ECOPULSE_REGION="$REGION" nohup "$RUN_PYTHON" server.py >"$BOT_DIR/.setup-smoketest.log" 2>&1 & echo $! >"$SMOKETEST_PID_FILE" )
+    TEST_SERVER_PID="$(cat "$SMOKETEST_PID_FILE" 2>/dev/null || true)"
 
     waited=0
     until curl -s -m 2 "http://localhost:$SERVER_PORT/health" >/dev/null 2>&1; do
@@ -521,8 +580,6 @@ else
         fail "Server didn't respond on port $SERVER_PORT within ${SERVER_BOOT_WAIT_SECS}s — see log above."
       fi
     done
-
-    TEST_SERVER_PID="$(get_pid_on_port "$SERVER_PORT")"
 
     HEALTH="$(curl -s "http://localhost:$SERVER_PORT/health")"
     ok "Server booted — /health: $HEALTH"
