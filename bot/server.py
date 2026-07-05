@@ -42,6 +42,7 @@ import os
 import sqlite3
 import sys
 import time
+from contextlib import asynccontextmanager
 
 # Load .env file if present (pip install python-dotenv)
 try:
@@ -196,6 +197,32 @@ def _init_db():
 # FastAPI app
 # ---------------------------------------------------------------------------
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Startup logic — replaces the deprecated @app.on_event('startup') hook."""
+    _init_db()
+    reachable = climate_llm.is_configured()
+    host = os.getenv("OLLAMA_HOST", "http://localhost:11434")
+    model = os.getenv("OLLAMA_MODEL", "ecopulse-guide")
+    gemini_key = os.getenv("GEMINI_API_KEY", "")
+    region = os.getenv("ECOPULSE_REGION", "ghana")
+    admin_token_set = bool(os.getenv("ECOPULSE_ADMIN_TOKEN", "").strip())
+
+    logger.info("=" * 60)
+    logger.info("EcoPulse Climate Guide API server started")
+    logger.info(f"  Region           : {region}")
+    logger.info(f"  Ollama host      : {host}")
+    logger.info(f"  Ollama model     : {model}")
+    logger.info(f"  Ollama ready     : {'YES \u2713' if reachable else 'NO - will use Gemini fallback'}")
+    logger.info(f"  Gemini key       : {'SET \u2713' if gemini_key else 'not set'}")
+    logger.info(f"  Admin token      : {'SET \u2713 (PATCH /incidents/*/status enabled)' if admin_token_set else 'NOT SET \u2014 PATCH /status is disabled (safe default)'}")
+    logger.info(f"  DB path          : {DB_PATH}")
+    logger.info(f"  Org dashboard    : http://localhost:{os.getenv('SERVER_PORT', 8000)}/dashboard")
+    logger.info("  Android emulator endpoint : http://10.0.2.2:8000")
+    logger.info("=" * 60)
+    yield  # server runs
+
+
 app = FastAPI(
     title="EcoPulse Climate Guide API",
     description=(
@@ -204,6 +231,7 @@ app = FastAPI(
         "/ask, /incidents, /leaderboard, and /profile endpoints."
     ),
     version="2.0.0",
+    lifespan=lifespan,
 )
 
 # In production, set ALLOWED_ORIGINS to your specific domains/app identifiers.
@@ -317,15 +345,10 @@ def ask(req: AskRequest):
     logger.info(f"[ask] user_id={req.user_id} text={text[:60]!r}")
 
     try:
-        reply = climate_agent.ask(text, user_id=req.user_id)
+        reply, source = climate_agent.ask_with_source(text, user_id=req.user_id)
     except Exception as e:
         logger.exception(f"Unexpected error from climate_agent.ask: {e}")
         raise HTTPException(status_code=500, detail=f"Agent error: {e}")
-
-    # Determine which backend was actually used (best-effort)
-    source = "ollama" if climate_llm.is_configured() else (
-        "gemini" if os.getenv("GEMINI_API_KEY") else "fallback"
-    )
 
     logger.info(f"[ask] reply={reply[:80]!r} source={source}")
     return AskResponse(reply=reply, source=source)
@@ -395,19 +418,21 @@ def verify_admin_token(x_admin_token: str | None = Header(default=None)):
 
 
 @app.get("/incidents", summary="List all incident reports")
-def list_incidents(since: int = 0):
+def list_incidents(since: int = 0, limit: int = 500):
     """
-    Return all incidents, newest first. Supports optional ?since=<timestamp_ms>
+    Return incidents, newest first. Supports optional ?since=<timestamp_ms>
     for incremental sync — only returns incidents created after that timestamp.
+    Use ?limit=N to cap rows returned (default 500, max 5000).
 
     This is also what the org dashboard (GET /dashboard) reads from — same
     endpoint the Android app's map already uses, no separate org-facing API.
     """
+    limit = max(1, min(limit, 5000))  # clamp to [1, 5000]
     try:
         with _get_db() as conn:
             rows = conn.execute(
-                "SELECT * FROM incidents WHERE timestamp > ? ORDER BY timestamp DESC",
-                (since,),
+                "SELECT * FROM incidents WHERE timestamp > ? ORDER BY timestamp DESC LIMIT ?",
+                (since, limit),
             ).fetchall()
         return {"incidents": [dict(r) for r in rows]}
     except Exception as e:
@@ -553,32 +578,6 @@ def root_redirect():
     return RedirectResponse(url="/dashboard")
 
 
-# ---------------------------------------------------------------------------
-# Startup log
-# ---------------------------------------------------------------------------
-
-@app.on_event("startup")
-def on_startup():
-    _init_db()
-    reachable = climate_llm.is_configured()
-    host = os.getenv("OLLAMA_HOST", "http://localhost:11434")
-    model = os.getenv("OLLAMA_MODEL", "ecopulse-guide")
-    gemini_key = os.getenv("GEMINI_API_KEY", "")
-    region = os.getenv("ECOPULSE_REGION", "ghana")
-    admin_token_set = bool(_ADMIN_TOKEN)
-
-    logger.info("=" * 60)
-    logger.info("EcoPulse Climate Guide API server started")
-    logger.info(f"  Region           : {region}")
-    logger.info(f"  Ollama host      : {host}")
-    logger.info(f"  Ollama model     : {model}")
-    logger.info(f"  Ollama ready     : {'YES ✓' if reachable else 'NO - will use Gemini fallback'}")
-    logger.info(f"  Gemini key       : {'SET ✓' if gemini_key else 'not set'}")
-    logger.info(f"  Admin token      : {'SET ✓ (PATCH /incidents/*/status enabled)' if admin_token_set else 'NOT SET — PATCH /status is disabled (safe default)'}")
-    logger.info(f"  DB path          : {DB_PATH}")
-    logger.info(f"  Org dashboard    : http://localhost:{os.getenv('SERVER_PORT', 8000)}/dashboard")
-    logger.info("  Android emulator endpoint : http://10.0.2.2:8000")
-    logger.info("=" * 60)
 
 
 # ---------------------------------------------------------------------------

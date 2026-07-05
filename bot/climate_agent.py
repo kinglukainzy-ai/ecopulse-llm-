@@ -8,7 +8,7 @@ import os
 import re
 import time
 import requests
-from collections import deque
+from collections import deque, OrderedDict
 
 from region_config import REGION_NAME, LOCAL_LANGUAGE
 
@@ -30,17 +30,26 @@ def _get_client():
 
 
 HISTORY_TURNS = 6
-_history: dict[int, deque] = {}
+_MAX_HISTORY_USERS = 1_000  # LRU cap — evict oldest user beyond this
+_history: OrderedDict = OrderedDict()
 
 
 def _get_history(user_id: int) -> list:
-    if user_id not in _history:
+    if user_id in _history:
+        _history.move_to_end(user_id)  # mark recently used
+    else:
+        if len(_history) >= _MAX_HISTORY_USERS:
+            _history.popitem(last=False)  # evict LRU entry
         _history[user_id] = deque(maxlen=HISTORY_TURNS * 2)
     return list(_history[user_id])
 
 
 def _append_history(user_id: int, role: str, content: str):
-    if user_id not in _history:
+    if user_id in _history:
+        _history.move_to_end(user_id)
+    else:
+        if len(_history) >= _MAX_HISTORY_USERS:
+            _history.popitem(last=False)
         _history[user_id] = deque(maxlen=HISTORY_TURNS * 2)
     _history[user_id].append({"role": role, "content": content})
 
@@ -579,12 +588,13 @@ def _run_ollama_agent(user_id: int, text: str) -> str:
             fn_name = (call.get("function") or {}).get("name")
             fn_args = (call.get("function") or {}).get("arguments") or {}
             fn = tool_map.get(fn_name)
-            result = f"Unknown tool: {fn_name}" if not fn else fn(**fn_args)
             if fn:
                 try:
                     result = fn(**fn_args)
                 except Exception as e:
                     result = f"Tool error calling {fn_name}: {e}"
+            else:
+                result = f"Unknown tool: {fn_name}"
             messages.append({"role": "tool", "content": str(result), "name": fn_name or ""})
 
     return "I made too many tool calls without reaching an answer - try rephrasing."

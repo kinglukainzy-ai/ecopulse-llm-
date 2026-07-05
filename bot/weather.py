@@ -570,9 +570,10 @@ def get_active_alert(location: str) -> str:
 
     coords = _resolve_coordinates(location)
     if coords is None:
+        example_cities = ", ".join(f"'{c.title()}'" for c in list(CITIES.keys())[:3])
         return (
             f"Could not find coordinates for '{location}'. "
-            f"Try a major Ghana city name like 'Accra', 'Kumasi', or 'Tamale'."
+            f"Try a city name in {REGION_NAME} like {example_cities}."
         )
 
     lat, lon = coords
