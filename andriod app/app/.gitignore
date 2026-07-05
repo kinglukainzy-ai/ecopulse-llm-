@@ -1,1 +1,17 @@
+# Gradle build output
 /build
+
+# Gradle files
+/.gradle
+
+# Local configuration
+local.properties
+
+# Native build
+.externalNativeBuild/
+.cxx/
+
+# IDE
+*.iml
+.idea/
+.DS_Store

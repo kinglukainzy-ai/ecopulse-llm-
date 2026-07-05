@@ -24,6 +24,12 @@ __pycache__/
 venv/
 ENV/
 .pytest_cache/
+.mypy_cache/
+.cache/
+pip-wheel-metadata/
+*.egg-info/
+.coverage
+coverage.xml
 
 # Node (if applicable in the future)
 node_modules/
