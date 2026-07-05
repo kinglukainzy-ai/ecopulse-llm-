@@ -17,7 +17,7 @@ captures/
 *.aab
 
 # Python
-__pycache__/
+**/__pycache__/
 *.py[cod]
 *$py.class
 .venv/
@@ -30,6 +30,14 @@ pip-wheel-metadata/
 *.egg-info/
 .coverage
 coverage.xml
+
+# SQLite runtime database & WAL sidecar files
+*.db
+*.db-shm
+*.db-wal
+
+
+
 
 # Node (if applicable in the future)
 node_modules/
