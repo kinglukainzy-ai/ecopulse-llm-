@@ -36,38 +36,11 @@ class EcoPulseRepository(private val appDao: AppDao) {
             appDao.updateUserProfile(profile.copy(remoteId = java.util.UUID.randomUUID().toString()))
         }
 
-        // 2. Initialize Hazard Alerts
-        val currentAlerts = appDao.getAllHazardAlerts().first()
-        if (currentAlerts.isEmpty()) {
-            appDao.insertHazardAlerts(
-                listOf(
-                    HazardAlert(
-                        title = "High Risk Flood Alert - Nairobi River Basin",
-                        city = "Nairobi",
-                        hazardType = "Flood",
-                        severity = "Critical",
-                        plainLanguageGuidance = "• Elevate critical electrical and household appliances. \n• Avoid crossing swollen seasonal streams, especially on foot or lightweight boda-bodas.\n• Keep emergency contacts handy and pack essential items in waterproof bags.\n• Stand by for evacuation alerts from community leaders.",
-                        timestamp = System.currentTimeMillis() - 3600000 // 1 hour ago
-                    ),
-                    HazardAlert(
-                        title = "Extreme Heatwave Warning - Khartoum North",
-                        city = "Khartoum",
-                        hazardType = "Heatwave",
-                        severity = "High",
-                        plainLanguageGuidance = "• Limit high-exertion outdoor activities between 10:00 AM and 4:00 PM. \n• Hydrate continuously (at least 4 liters of water a day, avoid heavy sugar).\n• Keep animals and livestock well-shaded and watered.\n• Set up light cross-ventilation in rooms to lower ambient temperatures.",
-                        timestamp = System.currentTimeMillis() - 7200000 // 2 hours ago
-                    ),
-                    HazardAlert(
-                        title = "Coastal Storm Surge and Gale Alert",
-                        city = "Lagos",
-                        hazardType = "Storm",
-                        severity = "Medium",
-                        plainLanguageGuidance = "• Secure all loose building materials and roof sheeting. \n• Fishermen and marine operators must avoid open waters.\n• Unplug sensitive electronic equipment to protect against lightning surges.\n• Keep clear of heavy advertising billboards and power line corridors.",
-                        timestamp = System.currentTimeMillis() - 14400000 // 4 hours ago
-                    )
-                )
-            )
-        }
+        // 2. Hazard Alerts are NOT seeded with mock data anymore.
+        // Real alerts are populated live via refreshLiveAlert() once the app
+        // has the user's location (see EcoPulseViewModel.fetchLiveLocationAlert).
+        // The feed will show an empty/loading state until that first live
+        // fetch completes - this is intentional, not a bug.
 
         // 3. Initialize OSINT Audits
         val currentChallenges = appDao.getAllChallenges().first()
@@ -523,5 +496,31 @@ class EcoPulseRepository(private val appDao: AppDao) {
                 category = "Action"
             )
         }
+    }
+
+    /**
+     * Replaces whatever hazard alerts are currently stored with a single fresh
+     * live alert fetched from the bot server's /weather/{location} endpoint
+     * (which wraps Open-Meteo forecast + flood data - see bot/weather.py).
+     *
+     * Called once the app has a real device location (see
+     * EcoPulseViewModel.fetchLiveLocationAlert). The /weather endpoint returns
+     * a single narrated plain-language string rather than structured
+     * severity/type fields, so those are set to sensible generic defaults here.
+     */
+    suspend fun refreshLiveAlert(cityLabel: String, alertText: String) {
+        appDao.clearHazardAlerts()
+        appDao.insertHazardAlerts(
+            listOf(
+                HazardAlert(
+                    title = "Live Climate Alert - $cityLabel",
+                    city = cityLabel,
+                    hazardType = "Weather",
+                    severity = "Info",
+                    plainLanguageGuidance = alertText,
+                    timestamp = System.currentTimeMillis()
+                )
+            )
+        )
     }
 }

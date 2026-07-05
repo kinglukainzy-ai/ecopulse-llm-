@@ -341,15 +341,24 @@ def _is_negated_risk_match(reply: str, start: int) -> bool:
 
 
 def _safety_check(reply: str) -> str:
+    """Fast regex floor. FIXED: previously used pattern.search() which only
+    checks the FIRST occurrence of each pattern - if that first occurrence
+    happened to be negated (safe), the loop moved on to the next pattern
+    entirely, silently skipping any *later*, non-negated occurrence of the
+    same pattern in the same reply (e.g. "Don't go check the dumping site
+    yourself. Actually, go check the mine too." - first match negated,
+    second match never inspected). Now scans ALL occurrences of every
+    pattern via finditer() and only clears a reply if every single match,
+    across every pattern, is negated."""
     lowered = reply.lower()
     for pattern in _RISK_PATTERNS:
-        match = pattern.search(lowered)
-        if match and not _is_negated_risk_match(lowered, match.start()):
-            logger.warning(
-                f"[safety] reply matched risk pattern {pattern.pattern!r} - "
-                f"replacing with safe fallback. Original: {reply[:200]!r}"
-            )
-            return _SAFE_FALLBACK_REPLY
+        for match in pattern.finditer(lowered):
+            if not _is_negated_risk_match(lowered, match.start()):
+                logger.warning(
+                    f"[safety] reply matched risk pattern {pattern.pattern!r} - "
+                    f"replacing with safe fallback. Original: {reply[:200]!r}"
+                )
+                return _SAFE_FALLBACK_REPLY
     return reply
 
 
@@ -584,13 +593,29 @@ def _run_ollama_agent(user_id: int, text: str) -> str:
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
-def ask(text: str, user_id: int = 0) -> str:
+def ask(text: str, user_id: int = 0) -> tuple[str, str] | str:
     """Entry point for the Climate Guide. Pass 0 for user_id if the caller
     doesn't have a real per-user id (shared single-session history).
-    Special command: text='clear' wipes history for this user."""
+    Special command: text='clear' wipes history for this user.
+
+    Returns the reply string. Backwards-compatible callers that only
+    unpack a single string still work; server.py now uses ask_with_source()
+    below instead of calling climate_llm.is_configured() a second time to
+    determine which backend actually answered (that second call was a
+    redundant network round-trip to Ollama on every single request)."""
+    reply, _source = ask_with_source(text, user_id)
+    return reply
+
+
+def ask_with_source(text: str, user_id: int = 0) -> tuple[str, str]:
+    """Same as ask(), but also returns which backend produced the reply
+    ("ollama" | "gemini" | "fallback"), computed from the SAME
+    is_configured() check already made to route the request - instead of
+    calling climate_llm.is_configured() a second time after the fact
+    (which used to cost an extra Ollama round-trip per /ask call)."""
     if text.strip().lower() == "clear":
         clear_history(user_id)
-        return "Conversation history cleared. Starting fresh."
+        return "Conversation history cleared. Starting fresh.", "fallback"
 
     t0 = time.monotonic()
     import climate_llm
@@ -600,8 +625,11 @@ def ask(text: str, user_id: int = 0) -> str:
         f"{time.monotonic()-t0:.2f}s (configured={configured})"
     )
     if configured:
-        return _run_ollama_agent(user_id, text)
-    return _ask_gemini(text, user_id)
+        return _run_ollama_agent(user_id, text), "ollama"
+
+    reply = _ask_gemini(text, user_id)
+    source = "gemini" if os.getenv("GEMINI_API_KEY") else "fallback"
+    return reply, source
 
 
 def _ask_gemini(text: str, user_id: int = 0) -> str:

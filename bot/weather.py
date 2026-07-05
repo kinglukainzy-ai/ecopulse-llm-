@@ -29,7 +29,7 @@ import logging
 import requests
 from datetime import datetime, timezone
 
-from region_config import CITIES, TIMEZONE, GEOCODE_COUNTRY_CODE
+from region_config import CITIES, TIMEZONE, GEOCODE_COUNTRY_CODE, REGION_NAME, LOCAL_LANGUAGE
 
 logger = logging.getLogger("weather")
 
@@ -440,6 +440,20 @@ def _llm_report(location_name: str, h: dict, using_fallback: bool = False) -> st
     Preferred output path when the LLM is running - produces a more natural
     report than _format_alert()'s hardcoded template. Returns None on any
     failure so get_active_alert() can fall back to _format_alert() silently.
+
+    FIXED: this call used to send only a bare user-role prompt with no
+    system message, which meant it fell through to the model's BAKED
+    Modelfile.ecopulse persona instead of the dynamic, region-aware system
+    prompt that climate_agent.py's _run_ollama_agent() builds from
+    region_config on every call. That baked persona currently contains
+    unsubstituted `{region_name}` / `{local_language}` template placeholders
+    (Modelfile syntax doesn't do Python-style interpolation - see
+    Modelfile.ecopulse), and even once that's fixed, this path would still
+    silently ignore ECOPULSE_REGION switching that the rest of the app
+    relies on. This now builds the same kind of dynamic, region-aware
+    system message climate_agent.py uses, so live hazard-alert narration
+    gets the correct region/language context and the same hard safety rule
+    wording as regular chat, instead of depending on the Modelfile at all.
     """
     import os
     import requests as _req
@@ -483,10 +497,24 @@ def _llm_report(location_name: str, h: dict, using_fallback: bool = False) -> st
         if using_fallback else ""
     )
 
+    # Region-aware system message - mirrors climate_agent.SYSTEM_INSTRUCTION
+    # so this call is not dependent on the (currently broken) baked
+    # Modelfile persona and stays in sync with ECOPULSE_REGION switching.
+    system_msg = (
+        f"You are Eco, the EcoPulse Climate Guide. You help young people in "
+        f"{REGION_NAME} understand local climate hazards. VOICE: plain-spoken "
+        f"and warm, like a knowledgeable older sibling - never preachy, never "
+        f"alarmist, no textbook tone. Use {REGION_NAME}-local context and "
+        f"{LOCAL_LANGUAGE} phrases when actually relevant. "
+        "HARD SAFETY RULE, OVERRIDES EVERYTHING: never suggest, encourage, or "
+        "imply that a user should physically approach, enter, or get close to "
+        "a hazard site in order to check on it in person."
+    )
+
     prompt = (
         f"Here is the current weather and flood data for {location_name}:\n\n"
         f"{data_block}{fallback_note}\n\n"
-        "Write a 3-5 sentence hazard report for a young person in Ghana reading "
+        "Write a 3-5 sentence hazard report for a young person reading "
         "this in a mobile app. Use plain, warm, local language - not textbook language. "
         "Include: what conditions are like right now, whether there is flood or storm "
         "risk, and one specific action they should or should not take. "
@@ -500,7 +528,10 @@ def _llm_report(location_name: str, h: dict, using_fallback: bool = False) -> st
             f"{ollama_host}/api/chat",
             json={
                 "model": model,
-                "messages": [{"role": "user", "content": prompt}],
+                "messages": [
+                    {"role": "system", "content": system_msg},
+                    {"role": "user", "content": prompt},
+                ],
                 "stream": False,
                 "options": {
                     "temperature": 0.5,

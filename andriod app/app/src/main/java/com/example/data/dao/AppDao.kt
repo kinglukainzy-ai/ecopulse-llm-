@@ -16,6 +16,9 @@ interface AppDao {
     @Update
     suspend fun updateHazardAlert(alert: HazardAlert)
 
+    @Query("DELETE FROM hazard_alerts")
+    suspend fun clearHazardAlerts()
+
     // --- Investigation Challenges ---
     @Query("SELECT * FROM investigation_challenges ORDER BY id ASC")
     fun getAllChallenges(): Flow<List<InvestigationChallenge>>

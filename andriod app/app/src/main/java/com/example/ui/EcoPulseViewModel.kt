@@ -248,6 +248,27 @@ class EcoPulseViewModel(application: Application) : AndroidViewModel(application
         }
     }
 
+    // Tracks whether the first live location-based alert fetch has run,
+    // so the UI knows to show a loading/empty state vs. a real fetch failure.
+    private val _hasFetchedLiveAlert = MutableStateFlow(false)
+    val hasFetchedLiveAlert: StateFlow<Boolean> = _hasFetchedLiveAlert.asStateFlow()
+
+    /**
+     * Fetches a real, live hazard alert for the device's current coordinates
+     * from the bot server (Open-Meteo backed) and replaces whatever is in the
+     * hazard_alerts table with it. Called from the UI layer once location
+     * permission is granted and a fix is available - see the permission +
+     * FusedLocationProviderClient wiring in EcoPulseApp.kt / MainActivity.kt.
+     */
+    fun fetchLiveLocationAlert(lat: Double, lon: Double, cityLabel: String? = null) {
+        viewModelScope.launch {
+            val locationQuery = "$lat,$lon"
+            val alertText = ClimateApiService.getWeatherAlert(locationQuery)
+            repository.refreshLiveAlert(cityLabel ?: locationQuery, alertText)
+            _hasFetchedLiveAlert.value = true
+        }
+    }
+
     /**
      * Clears the conversation history on the bot server for this user.
      */
