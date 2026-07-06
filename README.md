@@ -81,4 +81,4 @@ User message
 
 This is the same tiered pattern as novelbot/Thoth. Read `novelbot/bot/ai_agent.py`
 for the full reasoning behind the trigger-word gating and tool-count overhead
-numbers - that file has more detailed comments than this one.
+numbers - that file has more detailed comments than this one..
