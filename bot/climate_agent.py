@@ -251,6 +251,51 @@ def _select_tool_names(text: str) -> set:
     return selected
 
 
+def _extract_json_candidates(text: str) -> list[str]:
+    """Scans text for bracket-balanced [...] or {...} substrings, so a model
+    reply like 'Let's check that: [{"name": ...}]' yields the embedded JSON
+    array instead of failing outright. Returns candidates in the order found,
+    preferring the first '[' or '{' encountered. Ignores brackets inside
+    string literals so a tool argument like {"note": "a [b] c"} doesn't
+    throw off the balance count."""
+    candidates = []
+    n = len(text)
+    i = 0
+    while i < n:
+        ch = text[i]
+        if ch in "[{":
+            open_ch = ch
+            close_ch = "]" if ch == "[" else "}"
+            depth = 0
+            in_string = False
+            escape = False
+            j = i
+            while j < n:
+                c = text[j]
+                if in_string:
+                    if escape:
+                        escape = False
+                    elif c == "\\":
+                        escape = True
+                    elif c == '"':
+                        in_string = False
+                else:
+                    if c == '"':
+                        in_string = True
+                    elif c == open_ch:
+                        depth += 1
+                    elif c == close_ch:
+                        depth -= 1
+                        if depth == 0:
+                            candidates.append(text[i:j + 1])
+                            break
+                j += 1
+            i = j + 1
+        else:
+            i += 1
+    return candidates
+
+
 def _parse_text_tool_calls(content: str, tool_map: dict) -> list | None:
     import json
 
@@ -260,9 +305,26 @@ def _parse_text_tool_calls(content: str, tool_map: dict) -> list | None:
     candidate = content.strip()
     candidate = re.sub(r"^```(?:json)?|```$", "", candidate.strip(), flags=re.IGNORECASE).strip()
 
-    try:
-        parsed = json.loads(candidate)
-    except (ValueError, TypeError):
+    def _try_parse(raw: str):
+        try:
+            return json.loads(raw)
+        except (ValueError, TypeError):
+            return None
+
+    # Fast path: the whole message is JSON (existing behavior, unchanged).
+    parsed = _try_parse(candidate)
+
+    # Slow path: the model prefaced the JSON with prose (e.g. "Let's check
+    # that: [...]"). Whole-string parsing fails in that case even though a
+    # valid tool call is embedded in the text - scan for bracket-balanced
+    # substrings and try each one instead of giving up.
+    if parsed is None:
+        for embedded in _extract_json_candidates(candidate):
+            parsed = _try_parse(embedded)
+            if parsed is not None:
+                break
+
+    if parsed is None:
         return None
 
     if isinstance(parsed, dict) and parsed and "name" not in parsed:
