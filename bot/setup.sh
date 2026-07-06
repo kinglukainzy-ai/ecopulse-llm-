@@ -444,6 +444,36 @@ SERVER_PORT="$(grep '^SERVER_PORT=' "$ENV_PATH" | cut -d= -f2)"
 SERVER_PORT="${SERVER_PORT:-8000}"
 
 # ---------------------------------------------------------------------------
+# Step 5b — auto-resolve port conflicts
+# ---------------------------------------------------------------------------
+# Shared boxes (student servers, multi-project VMs) often already have
+# something bound to 8000 (Docker containers, unrelated services) that has
+# nothing to do with EcoPulse and isn't ours to kill. Rather than failing
+# at the very end after the slow Ollama pull/build steps, probe for a free
+# port up front and just use that instead — updating .env so every later
+# step (smoke test, final server start, log messages) agrees on the port.
+log "Checking if port $SERVER_PORT is available"
+ORIGINAL_PORT="$SERVER_PORT"
+PORT_TRIES=0
+while port_in_use "$SERVER_PORT"; do
+  holder_pid="$(get_pid_on_port "$SERVER_PORT")"
+  holder_cmd="$(ps -p "$holder_pid" -o comm= 2>/dev/null || echo unknown)"
+  warn "Port $SERVER_PORT is already in use (pid $holder_pid, $holder_cmd) — not ours to kill, trying the next port"
+  SERVER_PORT=$((SERVER_PORT + 1))
+  PORT_TRIES=$((PORT_TRIES + 1))
+  if [[ $PORT_TRIES -ge 20 ]]; then
+    fail "Couldn't find a free port after checking $ORIGINAL_PORT through $SERVER_PORT. Free one up manually or set SERVER_PORT in .env yourself."
+  fi
+done
+
+if [[ "$SERVER_PORT" != "$ORIGINAL_PORT" ]]; then
+  sedi "s|^SERVER_PORT=.*|SERVER_PORT=$SERVER_PORT|" "$ENV_PATH"
+  ok "Port $ORIGINAL_PORT was busy — using $SERVER_PORT instead (saved to .env)"
+else
+  ok "Port $SERVER_PORT is free"
+fi
+
+# ---------------------------------------------------------------------------
 # Step 6 — database initialization
 # ---------------------------------------------------------------------------
 

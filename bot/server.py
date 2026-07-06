@@ -37,12 +37,13 @@ ORGANIZATION DASHBOARD:
     already existed.
 """
 
+import hmac
 import logging
 import os
 import sqlite3
 import sys
 import time
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 
 # Load .env file if present (pip install python-dotenv)
 try:
@@ -65,7 +66,7 @@ try:
     from fastapi.middleware.cors import CORSMiddleware
     from fastapi.staticfiles import StaticFiles
     from fastapi.responses import RedirectResponse
-    from pydantic import BaseModel
+    from pydantic import BaseModel, Field
     import uvicorn
 except ImportError:
     logger.error(
@@ -85,11 +86,16 @@ import climate_llm
 DB_PATH = os.path.join(os.path.dirname(__file__), "ecopulse.db")
 
 
-def _get_db() -> sqlite3.Connection:
+@contextmanager
+def _get_db():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")  # safe concurrent reads
-    return conn
+    try:
+        yield conn
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def _init_db():
@@ -234,6 +240,14 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
+
+limiter = Limiter(key_func=get_remote_address)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
 # In production, set ALLOWED_ORIGINS to your specific domains/app identifiers.
 # Defaults to "*" for easy local development.
 allowed_origins_env = os.getenv("ALLOWED_ORIGINS", "*")
@@ -262,7 +276,7 @@ def _require_admin(x_admin_token: str | None):
             status_code=403,
             detail="Status updates are disabled. Set ECOPULSE_ADMIN_TOKEN in .env to enable.",
         )
-    if x_admin_token != _ADMIN_TOKEN:
+    if not x_admin_token or not hmac.compare_digest(x_admin_token, _ADMIN_TOKEN):
         raise HTTPException(status_code=403, detail="Invalid or missing X-Admin-Token header.")
 
 
@@ -271,7 +285,7 @@ def _require_admin(x_admin_token: str | None):
 # ---------------------------------------------------------------------------
 
 class AskRequest(BaseModel):
-    text: str
+    text: str = Field(max_length=2000)
     user_id: int = 0  # per-user history key; 0 = anonymous / single session
 
 
@@ -326,7 +340,8 @@ def health():
 
 
 @app.post("/ask", response_model=AskResponse, summary="Ask the Climate Guide")
-def ask(req: AskRequest):
+@limiter.limit("10/minute")
+def ask(req: AskRequest, request: Request):
     """
     Send a question to the EcoPulse Climate Guide.
 
@@ -377,7 +392,8 @@ def weather_alert(location: str):
 # ---------------------------------------------------------------------------
 
 @app.post("/incidents", summary="Submit a community incident report")
-def create_incident(incident: IncidentCreate):
+@limiter.limit("5/minute")
+def create_incident(incident: IncidentCreate, request: Request):
     """
     Submit a new environmental incident report. The server assigns id, timestamp,
     and default status='Submitted'. Returns the assigned id so the client can store

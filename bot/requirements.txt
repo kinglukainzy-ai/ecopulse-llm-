@@ -9,3 +9,5 @@ python-dotenv>=1.0.0
 
 # Optional - only needed for Gemini fallback path
 # google-genai>=1.0.0
+slowapi>=0.1.9
+
