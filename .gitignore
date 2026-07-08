@@ -12,9 +12,14 @@ build/
 captures/
 .externalNativeBuild
 .cxx
+.kotlin/
 *.apk
 *.ap_
 *.aab
+
+# Local generated asset sources copied into app resources
+/eco_icon_transparent.png
+/mascot_recolored.png
 
 # Python
 **/__pycache__/
@@ -35,9 +40,6 @@ coverage.xml
 *.db
 *.db-shm
 *.db-wal
-
-
-
 
 # Node (if applicable in the future)
 node_modules/

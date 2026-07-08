@@ -40,11 +40,8 @@ import java.util.concurrent.TimeUnit
 // =============================================================================
 
 /**
- * The mascot avatar. Uses the existing ecopulse_logo drawable so this compiles
- * out of the box. For full fidelity to the mockup, export the mascot
- * illustration as app/src/main/res/drawable/mascot.png and swap the
- * painterResource id below to R.drawable.mascot — every mascot appearance in
- * the app (nav bar + chat bubble avatar) reads from this one composable.
+ * The mascot avatar. Every mascot appearance in the app reads from this one
+ * composable so the nav bar, AI guide, and empty states stay visually aligned.
  */
 @Composable
 fun MascotAvatar(size: androidx.compose.ui.unit.Dp, modifier: Modifier = Modifier) {
@@ -56,10 +53,12 @@ fun MascotAvatar(size: androidx.compose.ui.unit.Dp, modifier: Modifier = Modifie
         contentAlignment = Alignment.Center,
     ) {
         Image(
-            painter = painterResource(id = R.drawable.ecopulse_logo),
+            painter = painterResource(id = R.drawable.mascot_recolored),
             contentDescription = "Eco mascot",
             contentScale = ContentScale.Crop,
-            modifier = Modifier.size(size),
+            modifier = Modifier
+                .size(size)
+                .clip(CircleShape),
         )
     }
 }
